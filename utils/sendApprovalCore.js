@@ -78,8 +78,8 @@ export async function sendApprovalMessage(pageId) {
     throw new Error("会員ページに LINEユーザーID が設定されていません");
   }
 
-  // 5) 承認／否認リンクを生成（本番ドメインに合わせる）
-  const base = "https://approval.garagetsuno.org";
+  // 5) 承認／否認リンクを生成（/api 経由の本番ドメイン）
+  const base = "https://approval.garagetsuno.org/api";
   const approveUrl = `${base}/approve?id=${pageId}`;
   const denyUrl = `${base}/deny?id=${pageId}`;
 
