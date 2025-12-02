@@ -1,5 +1,4 @@
 // /utils/sendApprovalCore.js
-import fetch from 'node-fetch';
 
 export async function sendApprovalMessage(pageId) {
   const notionToken = process.env.NOTION_API_KEY;
