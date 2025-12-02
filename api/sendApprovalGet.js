@@ -1,5 +1,5 @@
 // /api/sendApprovalGet.js
-import { sendApprovalMessage } from '../../utils/sendApprovalCore.js'; 
+import { sendApprovalMessage } from '../utils/sendApprovalCore.js'; 
 
 export default async function handler(req, res) {
   try {
