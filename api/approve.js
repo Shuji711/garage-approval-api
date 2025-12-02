@@ -54,3 +54,12 @@ export default async function handler(req, res) {
     return res.status(500).send("エラーが発生しました。");
   }
 }
+
+await notion.pages.update({
+  page_id: pageId,
+  properties: {
+    "承認結果": { select: { name: "承認" } },
+    "承認日": { date: { start: new Date().toISOString() } },
+    "送信ステータス": { select: { name: "送信済" } }
+  }
+});
