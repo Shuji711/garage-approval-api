@@ -1,121 +1,79 @@
 // /utils/sendApprovalCore.js
-// 承認票ページIDを受け取り、
-// その承認票に紐づく「会員」の LINEユーザーID を取得して
-// 承認依頼メッセージを1人に送信する
 
 export async function sendApprovalMessage(pageId) {
   const notionToken = process.env.NOTION_API_KEY;
   const lineToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+  const toIds = process.env.LINE_TO_IDS;
 
-  if (!notionToken) {
-    throw new Error("NOTION_API_KEY is not set");
-  }
-  if (!lineToken) {
-    throw new Error("LINE_CHANNEL_ACCESS_TOKEN is not set");
+  if (!toIds) {
+    return {
+      ok: false,
+      error: "No LINE recipient IDs configured (env LINE_TO_IDS)",
+    };
   }
 
-  // 1) 承認票ページを取得
+  const recipients = toIds.split(",");
+
+  // --- 1. Notion からタイトル取得 ---
   const pageRes = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     headers: {
       Authorization: `Bearer ${notionToken}`,
       "Notion-Version": "2022-06-28",
+      "Content-Type": "application/json",
     },
   });
 
-  const page = await pageRes.json();
+  const pageData = await pageRes.json();
+  const title =
+    pageData.properties["タイトル"]?.title?.[0]?.plain_text || "承認依頼";
 
-  if (!pageRes.ok) {
-    console.error("Notion API error (approval page):", page);
-    throw new Error(`Notion API error: ${page.message || pageRes.statusText}`);
-  }
+  // --- 2. 承認URL・否認URL を生成 ---
+  const approveUrl = `https://approval.garagetsuno.org/approve?id=${pageId}`;
+  const denyUrl = `https://approval.garagetsuno.org/deny?id=${pageId}`;
 
-  const props = page.properties || {};
-
-  // 2) 承認票のタイトル（名前）を取得
-  //    「名前」 or 「案件名」など、柔軟に拾う
-  const titleProp = props["名前"] || props["案件名"] || props["Name"];
-  let title = "案件名なし";
-
-  if (titleProp?.title?.length) {
-    title = titleProp.title.map(t => t.plain_text).join("") || "案件名なし";
-  } else if (titleProp?.rich_text?.length) {
-    title = titleProp.rich_text.map(t => t.plain_text).join("") || "案件名なし";
-  }
-
-  // 3) 会員リレーションから、会員ページIDを取得
-  const memberRel = props["会員"] || props["承認者"] || props["会員（承認者）"];
-  const memberId = memberRel?.relation?.[0]?.id;
-
-  if (!memberId) {
-    throw new Error("承認票に会員リレーションが設定されていません（プロパティ「会員」）");
-  }
-
-  // 4) 会員ページを取得して「LINEユーザーID」を読む
-  const memberRes = await fetch(`https://api.notion.com/v1/pages/${memberId}`, {
+  // --- 3. Notion に URL を書き込む（承認URL／否認URL） ---
+  await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+    method: "PATCH",
     headers: {
       Authorization: `Bearer ${notionToken}`,
       "Notion-Version": "2022-06-28",
+      "Content-Type": "application/json",
     },
+    body: JSON.stringify({
+      properties: {
+        "承認URL": { url: approveUrl },
+        "否認URL": { url: denyUrl },
+      },
+    }),
   });
 
-  const memberPage = await memberRes.json();
-
-  if (!memberRes.ok) {
-    console.error("Notion API error (member page):", memberPage);
-    throw new Error(`Notion API error (member): ${memberPage.message || memberRes.statusText}`);
-  }
-
-  const mProps = memberPage.properties || {};
-  const lineIdProp = mProps["LINEユーザーID"];
-
-  let lineUserId = "";
-
-  if (lineIdProp?.rich_text?.length) {
-    lineUserId = lineIdProp.rich_text.map(t => t.plain_text).join("").trim();
-  }
-
-  if (!lineUserId) {
-    throw new Error("会員ページに LINEユーザーID が設定されていません");
-  }
-
-  // 5) 承認／否認リンクを生成（/api 経由の本番ドメイン）
-  const base = "https://approval.garagetsuno.org/api";
-  const approveUrl = `${base}/approve?id=${pageId}`;
-  const denyUrl = `${base}/deny?id=${pageId}`;
-
-  // 6) LINE に送るメッセージ
+  // --- 4. LINE メッセージ本文 ---
   const message = {
     type: "flex",
-    altText: "【承認のお願い】",
+    altText: "承認依頼があります",
     contents: {
       type: "bubble",
       body: {
         type: "box",
         layout: "vertical",
         contents: [
-          { type: "text", text: "【承認のお願い】", weight: "bold", size: "lg" },
-          { type: "text", text: `案件名：${title}`, wrap: true, margin: "md" },
-          {
-            type: "separator",
-            margin: "md",
-          },
+          { type: "text", text: "承認依頼", weight: "bold", size: "lg" },
+          { type: "text", text: title, wrap: true, margin: "md" },
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        contents: [
           {
             type: "button",
-            style: "primary",
-            margin: "md",
             action: { type: "uri", label: "承認する", uri: approveUrl },
+            style: "primary",
           },
           {
             type: "button",
-            style: "secondary",
-            margin: "sm",
             action: { type: "uri", label: "否認する", uri: denyUrl },
-          },
-          {
-            type: "text",
-            text: "※承認結果は自動で記録されます。",
-            size: "xs",
-            color: "#999999",
+            style: "secondary",
             margin: "md",
           },
         ],
@@ -123,24 +81,23 @@ export async function sendApprovalMessage(pageId) {
     },
   };
 
-  // 7) LINE へ送信（この承認票の担当者 1名のみ）
-  const res = await fetch("https://api.line.me/v2/bot/message/push", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${lineToken}`,
-    },
-    body: JSON.stringify({
-      to: lineUserId,
-      messages: [message],
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    console.error("LINE API error:", res.status, body);
-    throw new Error(`LINE API error: ${res.status}`);
+  // --- 5. LINE 送信 ---
+  for (const id of recipients) {
+    await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${lineToken}`,
+      },
+      body: JSON.stringify({
+        to: id,
+        messages: [message],
+      }),
+    });
   }
 
-  return { ok: true, sentTo: [lineUserId] };
+  return {
+    ok: true,
+    sentTo: recipients,
+  };
 }
