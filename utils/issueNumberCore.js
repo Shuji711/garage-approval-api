@@ -1,10 +1,11 @@
 // /utils/issueNumberCore.js
-// 議案DBの「連番」を自動採番する関数群
+// 議案DBの「連番」を自動採番するコアロジック
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_GIAN_DATABASE_ID = process.env.NOTION_GIAN_DATABASE_ID;
 const NOTION_VERSION = "2022-06-28";
 
+/** Notion API 共通ラッパー */
 async function notionFetch(path, options = {}) {
   const res = await fetch(`https://api.notion.com/v1/${path}`, {
     ...options,
@@ -22,40 +23,38 @@ async function notionFetch(path, options = {}) {
       `Notion API error [${path}]: ${res.status} ${text || res.statusText}`
     );
   }
-
   return res.json();
 }
 
+/** ページ1件取得 */
 async function fetchPage(pageId) {
   return notionFetch(`pages/${pageId}`, { method: "GET" });
 }
 
-async function queryExistingIssueNumbers({ yy, mm, meetingCode, kubun }) {
+/**
+ * 対象月＋承認対象が同じ既存議案を取得
+ * created_time 範囲（start <= created_time < end）と 承認対象 で絞り込む
+ */
+async function queryExistingIssues({ monthStartISO, monthEndISO, approvalTarget }) {
   const body = {
     filter: {
       and: [
         {
-          property: "YY",
-          formula: {
-            string: { equals: yy },
+          timestamp: "created_time",
+          created_time: {
+            on_or_after: monthStartISO,
           },
         },
         {
-          property: "MM",
-          formula: {
-            string: { equals: mm },
+          timestamp: "created_time",
+          created_time: {
+            before: monthEndISO,
           },
         },
         {
-          property: "会議体コード",
-          formula: {
-            string: { equals: meetingCode },
-          },
-        },
-        {
-          property: "区分",
+          property: "承認対象",
           select: {
-            equals: kubun,
+            equals: approvalTarget,
           },
         },
       ],
@@ -74,6 +73,7 @@ async function queryExistingIssueNumbers({ yy, mm, meetingCode, kubun }) {
   return data.results || [];
 }
 
+/** 連番を書き戻し */
 async function updateSequence(pageId, seq) {
   const body = {
     properties: {
@@ -93,46 +93,93 @@ async function updateSequence(pageId, seq) {
  * 議案ページIDを渡すと：
  * - 連番が未設定なら、自動採番して書き込む
  * - すでに入っていれば、その値をそのまま返す
+ *
+ * 採番条件：
+ *   同じ「作成月」「承認対象」「区分コード」の中で最大連番+1
  */
 export async function ensureIssueSequence(proposalPageId) {
-  // 1. ページ取得
+  // 1. 対象議案ページを取得
   const page = await fetchPage(proposalPageId);
   const props = page.properties || {};
 
-  // すでに連番が入っていればそれを返す
+  // すでに連番が入っていれば、そのまま返す
   const currentSeq = props["連番"]?.number ?? null;
   if (typeof currentSeq === "number" && currentSeq > 0) {
     return currentSeq;
   }
 
-  // YY / MM / 会議体コード / 区分 を取得
-  const yy =
-    props["YY"]?.formula?.string ??
-    (typeof props["YY"]?.formula?.number === "number"
-      ? String(props["YY"].formula.number)
-      : null);
-  const mm = props["MM"]?.formula?.string ?? null;
-  const meetingCode = props["会議体コード"]?.formula?.string ?? null;
-  const kubun = props["区分"]?.select?.name ?? null;
+  // 作成日時（Created time プロパティ）→ JS Date
+  const createdProp = props["作成日時"];
+  const createdISO =
+    createdProp?.created_time || page.created_time; // 念のためページ本体の created_time も fallback
 
-  if (!yy || !mm || !meetingCode || !kubun) {
-    throw new Error(
-      `議案ページに必要な値が足りません (YY/MM/会議体コード/区分)`
-    );
+  if (!createdISO) {
+    throw new Error("作成日時が取得できませんでした。");
+  }
+  const createdDate = new Date(createdISO); // ここではそのまま使う（ローカルタイムの差は月単位なのでほぼ問題なし）
+
+  const year = createdDate.getUTCFullYear();
+  const month = createdDate.getUTCMonth(); // 0-11
+
+  // 月初（UTC）と翌月月初（UTC）
+  const monthStart = new Date(Date.UTC(year, month, 1, 0, 0, 0));
+  const monthEnd = new Date(Date.UTC(year, month + 1, 1, 0, 0, 0));
+
+  const monthStartISO = monthStart.toISOString();
+  const monthEndISO = monthEnd.toISOString();
+
+  // 承認対象（理事会／正会員）
+  const approvalTarget = props["承認対象"]?.select?.name ?? null;
+  if (!approvalTarget) {
+    throw new Error("承認対象が未設定です。");
   }
 
-  // 2. 同じ YY+MM+会議体+区分 の既存レコードを検索して最大連番を求める
-  const existing = await queryExistingIssueNumbers({
-    yy,
-    mm,
-    meetingCode,
-    kubun,
+  // 区分コード（Rollup → テキスト化）
+  let kubunCode = "";
+  const kubunRollup = props["区分コード"];
+  if (kubunRollup?.rollup?.type === "array") {
+    const arr = kubunRollup.rollup.array || [];
+    const first = arr[0];
+    if (first && first.type === "rich_text") {
+      kubunCode = first.rich_text.plain_text || "";
+    }
+  } else if (typeof kubunRollup?.plain_text === "string") {
+    kubunCode = kubunRollup.plain_text;
+  }
+
+  if (!kubunCode) {
+    throw new Error("区分コードが取得できませんでした。");
+  }
+
+  // 2. 同じ月＋承認対象の既存議案を取得
+  const existing = await queryExistingIssues({
+    monthStartISO,
+    monthEndISO,
+    approvalTarget,
   });
 
+  // 3. その中から「区分コードも同じ」ものだけを対象にして最大連番を探す
   let maxSeq = 0;
   for (const item of existing) {
     if (item.id === proposalPageId) continue;
+
     const p = item.properties || {};
+
+    // 区分コード比較
+    let itemKubunCode = "";
+    const kc = p["区分コード"];
+    if (kc?.rollup?.type === "array") {
+      const arr = kc.rollup.array || [];
+      const first = arr[0];
+      if (first && first.type === "rich_text") {
+        itemKubunCode = first.rich_text.plain_text || "";
+      }
+    } else if (typeof kc?.plain_text === "string") {
+      itemKubunCode = kc.plain_text;
+    }
+
+    if (itemKubunCode !== kubunCode) continue;
+
     const seq = p["連番"]?.number ?? 0;
     if (typeof seq === "number" && seq > maxSeq) {
       maxSeq = seq;
@@ -141,7 +188,7 @@ export async function ensureIssueSequence(proposalPageId) {
 
   const nextSeq = maxSeq + 1;
 
-  // 3. 連番を書き戻し
+  // 4. 連番を書き戻す
   await updateSequence(proposalPageId, nextSeq);
 
   return nextSeq;
