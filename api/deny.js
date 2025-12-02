@@ -7,11 +7,17 @@ async function updateApproval(pageId, resultName) {
 
   const body = {
     properties: {
+      // セレクトプロパティ「承認結果」に "否認" を入れる
       "承認結果": {
-        select: { name: resultName }, // "否認"
+        select: { name: resultName },
       },
+      // 日付プロパティ「承認日時」に実行時刻を入れる
       "承認日時": {
         date: { start: now },
+      },
+      // ★追加：セレクトプロパティ「送信ステータス」を「送信済」に
+      "送信ステータス": {
+        select: { name: "送信済" },
       },
     },
   };
@@ -44,7 +50,9 @@ export default async function handler(req, res) {
 
     await updateApproval(id, "否認");
 
-    return res.status(200).send("否認として受け付けました。ご確認ありがとうございます。");
+    return res
+      .status(200)
+      .send("否認として受け付けました。ご対応ありがとうございます。");
   } catch (e) {
     console.error(e);
     return res.status(500).send("エラーが発生しました。");
