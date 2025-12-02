@@ -2,9 +2,11 @@
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
 
-// ★ここを本番値に差し替え
-const MEMBERS_DB_ID = "会員DBのデータベースID";
-const APPROVAL_DB_ID = "承認票DBのデータベースID";
+// Notion データベースID
+// 会員DB
+const MEMBERS_DB_ID = "2ba9f7abb33d8087b1cccb9e96348f26";
+// 承認票DB
+const APPROVAL_DB_ID = "2ba9f7abb33d806e92ccded4f2149d86";
 
 export async function GET(req) {
   const { searchParams } = new URL(req.url);
@@ -14,7 +16,7 @@ export async function GET(req) {
     return new Response("Missing proposalId", { status: 400 });
   }
 
-  // 0. 議案ページから「承認対象」を取得
+  // 0. 議案ページから「承認対象」を取得（理事会 / 正会員）
   const proposalRes = await fetch(
     `https://api.notion.com/v1/pages/${proposalId}`,
     {
@@ -37,12 +39,12 @@ export async function GET(req) {
   const approvalTarget =
     proposal.properties["承認対象"]?.select?.name || "理事会";
 
-  // 1. どのチェックボックスを見るか決める
-  //   理事会 → 会員DBの「理事」= true
-  //   正会員 → 会員DBの「正会員」= true
+  // 1. どのロールを見るか決定
+  //   理事会 → 会員DB「理事」チェック
+  //   正会員 → 会員DB「正会員」チェック
   const roleProperty = approvalTarget === "正会員" ? "正会員" : "理事";
 
-  // 2. 会員DBをクエリ（役割＋LINEユーザーIDあり）
+  // 2. 会員DBをクエリ（役割 + LINEユーザーIDあり）
   const membersRes = await fetch(
     `https://api.notion.com/v1/databases/${MEMBERS_DB_ID}/query`,
     {
@@ -77,11 +79,16 @@ export async function GET(req) {
   const membersData = await membersRes.json();
   const targets = membersData.results;
 
+  // 対象者がいない場合も正常終了にしておく
+  if (!targets || targets.length === 0) {
+    return new Response("No members found for approval", { status: 200 });
+  }
+
   // 3. 対象者ごとに承認票を作成
   for (const m of targets) {
     const memberPageId = m.id;
 
-    // 承認票ページを作成
+    // 3-1. 承認票ページを作成
     const createRes = await fetch("https://api.notion.com/v1/pages", {
       method: "POST",
       headers: {
@@ -92,24 +99,24 @@ export async function GET(req) {
       body: JSON.stringify({
         parent: { database_id: APPROVAL_DB_ID },
         properties: {
-          // とりあえずシンプルなタイトル
-          "名前": {
+          // タイトル（必要に応じてあとで変更可）
+          名前: {
             title: [
               {
                 text: { content: "承認票" },
               },
             ],
           },
-          "議案": {
+          議案: {
             relation: [{ id: proposalId }],
           },
-          "会員": {
+          会員: {
             relation: [{ id: memberPageId }],
           },
-          "承認結果": {
+          承認結果: {
             select: null,
           },
-          "承認日時": {
+          承認日時: {
             date: null,
           },
         },
@@ -124,7 +131,7 @@ export async function GET(req) {
     const created = await createRes.json();
     const approvalPageId = created.id;
 
-    // 自分の「ページID」プロパティにIDを書き込む
+    // 3-2. 自分の「ページID」プロパティにIDを書き込む
     await fetch(`https://api.notion.com/v1/pages/${approvalPageId}`, {
       method: "PATCH",
       headers: {
@@ -134,7 +141,7 @@ export async function GET(req) {
       },
       body: JSON.stringify({
         properties: {
-          "ページID": {
+          ページID: {
             rich_text: [
               {
                 text: {
