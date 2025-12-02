@@ -15,10 +15,6 @@ async function updateApproval(pageId, resultName) {
       "承認日時": {
         date: { start: now },
       },
-      // ★ここを追加：セレクトプロパティ「送信ステータス」を「送信済」に
-      "送信ステータス": {
-        select: { name: "送信済" },
-      },
     },
   };
 
@@ -34,27 +30,20 @@ async function updateApproval(pageId, resultName) {
 
   if (!res.ok) {
     const text = await res.text();
-    console.error("Notion API error:", res.status, text);
-    throw new Error("Notion API error");
+    return new Response(text, { status: res.status });
   }
+
+  return new Response("OK");
 }
 
-export default async function handler(req, res) {
-  try {
-    const id = req.query.id;
-    if (!id) {
-      return res
-        .status(400)
-        .send("id パラメータがありません。（承認票の id() を渡してください）");
-    }
+export async function GET(req) {
+  const { searchParams } = new URL(req.url);
+  const pageId = searchParams.get("id");
 
-    await updateApproval(id, "承認");
-
-    return res
-      .status(200)
-      .send("承認として受け付けました。ご対応ありがとうございます。");
-  } catch (e) {
-    console.error(e);
-    return res.status(500).send("エラーが発生しました。");
+  if (!pageId) {
+    return new Response("Missing id", { status: 400 });
   }
+
+  // 承認
+  return updateApproval(pageId, "承認");
 }
