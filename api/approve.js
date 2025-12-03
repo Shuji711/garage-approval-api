@@ -24,12 +24,19 @@ function formatJpDate(dateStr) {
 
 function deriveAttachmentLabel(url, index) {
   try {
-    const withoutQuery = url.split(/[?#]/)[0];
-    const lastPart = withoutQuery.split("/").pop() || "";
-    const decoded = decodeURIComponent(lastPart);
+    // クエリ・フラグメントを除去
+    const cleaned = url.split(/[?#]/)[0];
+    let name = cleaned.split("/").pop() || "";
+
+    // Google Drive 等で /view で終わる場合はファイル名にできないのでフォールバック
+    if (name.toLowerCase() === "view") {
+      return `添付資料${index}`;
+    }
+
+    const decoded = decodeURIComponent(name);
     if (decoded) return decoded;
   } catch (e) {
-    // ignore
+    // noop
   }
   return `添付資料${index}`;
 }
@@ -245,7 +252,7 @@ async function updateApproval(pageId, resultKey, commentText) {
     }
   }
 
-  // 承認結果プロパティが存在していないと困るので存在チェック（エラーのままにする）
+  // 承認結果・承認日時 が無いと困るので存在チェック
   if (!props["承認結果"] || props["承認結果"].type !== "select") {
     throw new Error('Notion page is missing expected property: "承認結果"');
   }
@@ -257,11 +264,9 @@ async function updateApproval(pageId, resultKey, commentText) {
   const resultName = resultKey === "approve" ? "承認" : "否認";
 
   const updateProps = {
-    // セレクトプロパティ「承認結果」に "承認" / "否認" を入れる
     承認結果: {
       select: { name: resultName },
     },
-    // 日付プロパティ「承認日時」に実行時刻を入れる
     承認日時: {
       date: { start: now },
     },
@@ -595,11 +600,6 @@ function renderFormHtml({
         <div class="helper">※「承認」または「否認」を選んでから送信してください。</div>
       </div>
     </form>
-
-    <div class="footer">
-      この画面を閉じても処理は完了しています。<br/>
-      必要に応じて、担当者へご確認ください。
-    </div>
   </div>
 </div>
 </body>
@@ -706,7 +706,7 @@ function renderResultHtml({ title, issueNo, resultKey, comment }) {
     ${commentBlock}
 
     <div class="footer">
-      画面を閉じても処理は完了しています。<br/>
+      この画面を閉じても処理は完了しています。<br/>
       必要であれば、Notion 上の承認票で内容をご確認ください。
     </div>
   </div>
