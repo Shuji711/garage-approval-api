@@ -71,18 +71,19 @@ export async function sendApprovalMessage(pageId) {
     console.error("Issue number generation failed:", e);
   }
 
-  // --- 3. 承認者（リレーション）から 会員DB のページID を取得 ---
-  const approverRelation = pageData.properties["承認者"]?.relation || [];
+  // --- 3. 会員リレーションから 会員DB のページID を取得 ---
+  // ※ 承認者DB 経由ではなく、承認票DB の「会員」プロパティを使う
+  const memberRelation = pageData.properties["会員"]?.relation || [];
 
-  if (approverRelation.length === 0) {
-    return { ok: false, error: "承認者が設定されていません。" };
+  if (memberRelation.length === 0) {
+    return { ok: false, error: "会員が設定されていません。" };
   }
 
   // --- 4. 会員DBの各ページから LINEユーザーID を取得 ---
   const lineUserIds = [];
 
-  for (const person of approverRelation) {
-    const memberId = person.id;
+  for (const member of memberRelation) {
+    const memberId = member.id;
 
     const memberRes = await fetch(
       `https://api.notion.com/v1/pages/${memberId}`,
@@ -98,14 +99,33 @@ export async function sendApprovalMessage(pageId) {
     if (!memberRes.ok) continue;
 
     const memberData = await memberRes.json();
-    const lineId =
-      memberData.properties["LINEユーザーID"]?.rich_text?.[0]?.plain_text;
 
-    if (lineId) lineUserIds.push(lineId);
+    const lineProp = memberData.properties["LINEユーザーID"];
+    let lineId = "";
+
+    if (lineProp) {
+      lineId =
+        // 通常のテキストプロパティ（rich_text）
+        lineProp.rich_text?.[0]?.plain_text ??
+        // 万が一タイトルで持っていた場合
+        lineProp.title?.[0]?.plain_text ??
+        // フォーミュラで文字列を返している場合
+        lineProp.formula?.string ??
+        "";
+    }
+
+    if (lineId) {
+      lineUserIds.push(lineId);
+    } else {
+      console.error(
+        "LINEユーザーID property found but no value:",
+        JSON.stringify(lineProp, null, 2)
+      );
+    }
   }
 
   if (lineUserIds.length === 0) {
-    return { ok: false, error: "承認者に LINEユーザーID がありません。" };
+    return { ok: false, error: "会員に LINEユーザーID がありません。" };
   }
 
   // --- 5. 承認URL・否認URL を生成 ---
