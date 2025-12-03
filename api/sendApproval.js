@@ -20,8 +20,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Notion から会員DBを辿って LINEユーザーID を取り、
-    // LINE に承認依頼を送る本体処理
     const result = await sendApprovalMessage(pageId);
 
     if (!result.ok) {
