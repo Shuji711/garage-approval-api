@@ -32,15 +32,12 @@ export async function sendApprovalMessage(pageId) {
   let issueNo = "";
 
   try {
-    // 承認票ページの「議案」リレーションから議案ページIDを取得
     const proposalRel = pageData.properties["議案"]?.relation || [];
     const proposalPageId = proposalRel[0]?.id;
 
     if (proposalPageId) {
-      // ① 連番を自動採番（未採番なら振る）
       await ensureIssueSequence(proposalPageId);
 
-      // ② 採番後の議案ページを再取得
       const proposalRes = await fetch(
         `https://api.notion.com/v1/pages/${proposalPageId}`,
         {
@@ -55,7 +52,6 @@ export async function sendApprovalMessage(pageId) {
       if (proposalRes.ok) {
         const proposalData = await proposalRes.json();
 
-        // 議案番号プロパティ（名前は環境に合わせて変更可）
         const issueProp =
           proposalData.properties["議案番号フォーミュラ"] ||
           proposalData.properties["議案番号"];
@@ -67,72 +63,84 @@ export async function sendApprovalMessage(pageId) {
       }
     }
   } catch (e) {
-    // 議案番号周りでエラーが出ても、承認依頼自体は送る
     console.error("Issue number generation failed:", e);
   }
 
-  // --- 3. 会員リレーションから 会員DB のページID を取得 ---
-  // ※ 承認者DB 経由ではなく、承認票DB の「会員」プロパティを使う
-  const memberRelation = pageData.properties["会員"]?.relation || [];
-
-  if (memberRelation.length === 0) {
-    return { ok: false, error: "会員が設定されていません。" };
-  }
-
-  // --- 4. 会員DBの各ページから LINEユーザーID を取得 ---
+  // --- 3. LINEユーザーID の取得 ---
   const lineUserIds = [];
 
-  for (const member of memberRelation) {
-    const memberId = member.id;
+  // 3-1. 承認票DB のロールアップ「LINEユーザーID」を優先的に使う
+  const lineRollupProp = pageData.properties["LINEユーザーID"];
+  if (lineRollupProp?.type === "rollup" && lineRollupProp.rollup) {
+    const roll = lineRollupProp.rollup;
 
-    const memberRes = await fetch(
-      `https://api.notion.com/v1/pages/${memberId}`,
-      {
-        headers: {
-          Authorization: `Bearer ${notionToken}`,
-          "Notion-Version": "2022-06-28",
-          "Content-Type": "application/json",
-        },
+    if (roll.type === "array" && Array.isArray(roll.array)) {
+      for (const item of roll.array) {
+        const val =
+          item.rich_text?.[0]?.plain_text ??
+          item.title?.[0]?.plain_text ??
+          item.formula?.string ??
+          "";
+        if (val) lineUserIds.push(val);
       }
-    );
-
-    if (!memberRes.ok) continue;
-
-    const memberData = await memberRes.json();
-
-    const lineProp = memberData.properties["LINEユーザーID"];
-    let lineId = "";
-
-    if (lineProp) {
-      lineId =
-        // 通常のテキストプロパティ（rich_text）
-        lineProp.rich_text?.[0]?.plain_text ??
-        // 万が一タイトルで持っていた場合
-        lineProp.title?.[0]?.plain_text ??
-        // フォーミュラで文字列を返している場合
-        lineProp.formula?.string ??
-        "";
+    } else if (roll.type === "number" || roll.type === "date") {
+      // 今回は想定外だが念のため無視
     }
+  }
 
-    if (lineId) {
-      lineUserIds.push(lineId);
-    } else {
-      console.error(
-        "LINEユーザーID property found but no value:",
-        JSON.stringify(lineProp, null, 2)
+  // 3-2. ロールアップで取れなかった場合は「会員」リレーションから会員DBを直接読む
+  if (lineUserIds.length === 0) {
+    const memberRelation = pageData.properties["会員"]?.relation || [];
+
+    for (const member of memberRelation) {
+      const memberId = member.id;
+
+      const memberRes = await fetch(
+        `https://api.notion.com/v1/pages/${memberId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${notionToken}`,
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
+          },
+        }
       );
+
+      if (!memberRes.ok) continue;
+
+      const memberData = await memberRes.json();
+
+      const lineProp = memberData.properties["LINEユーザーID"];
+      let lineId = "";
+
+      if (lineProp) {
+        lineId =
+          lineProp.rich_text?.[0]?.plain_text ??
+          lineProp.title?.[0]?.plain_text ??
+          lineProp.formula?.string ??
+          "";
+      }
+
+      if (lineId) {
+        lineUserIds.push(lineId);
+      } else {
+        console.error(
+          "LINEユーザーID property found but no value on member:",
+          JSON.stringify(lineProp, null, 2)
+        );
+      }
     }
   }
 
   if (lineUserIds.length === 0) {
-    return { ok: false, error: "会員に LINEユーザーID がありません。" };
+    return { ok: false, error: "LINEユーザーID を取得できませんでした。" };
   }
 
-  // --- 5. 承認URL・否認URL を生成 ---
+  // --- 4. 承認URL・否認URL を生成 ---
   const approveUrl = `https://approval.garagetsuno.org/approve?id=${pageId}`;
   const denyUrl = `https://approval.garagetsuno.org/deny?id=${pageId}`;
 
-  // --- 6. Notion に URL を書き込む（プロパティ名：approveURL / denyURL） ---
+  // --- 5. Notion に URL を書き込む（プロパティ名：approveURL / denyURL） ---
   await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "PATCH",
     headers: {
@@ -148,12 +156,11 @@ export async function sendApprovalMessage(pageId) {
     }),
   });
 
-  // --- 7. LINE メッセージ内容（Flex） ---
+  // --- 6. LINE メッセージ内容（Flex） ---
   const bodyContents = [
     { type: "text", text: "承認依頼", weight: "bold", size: "lg" },
   ];
 
-  // 議案番号が取れていれば表示行を追加
   if (issueNo) {
     bodyContents.push({
       type: "text",
@@ -163,7 +170,6 @@ export async function sendApprovalMessage(pageId) {
     });
   }
 
-  // 件名
   bodyContents.push({
     type: "text",
     text: title,
@@ -201,7 +207,7 @@ export async function sendApprovalMessage(pageId) {
     },
   };
 
-  // --- 8. LINE に送信 ---
+  // --- 7. LINE に送信 ---
   for (const lineId of lineUserIds) {
     await fetch("https://api.line.me/v2/bot/message/push", {
       method: "POST",
