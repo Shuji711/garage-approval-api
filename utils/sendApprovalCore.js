@@ -234,12 +234,12 @@ async function sendApprovalMessage(pageId) {
       },
       style: "primary",
       color: "#4A90E2", // 青系
-      height: "lg", // 高さ 約150%
+      height: "md", // 有効値: "sm" or "md"
       margin: "sm",
     });
   }
 
-  // 承認／否認ボタン — 横並び（高さ大きめ）
+  // 承認／否認ボタン — 横並び
   footerContents.push({
     type: "box",
     layout: "horizontal",
@@ -249,7 +249,7 @@ async function sendApprovalMessage(pageId) {
       {
         type: "button",
         style: "primary",
-        height: "xl", // 高さ 約250%
+        height: "md", // Flex仕様上の最大
         flex: 1,
         action: {
           type: "postback",
@@ -260,7 +260,7 @@ async function sendApprovalMessage(pageId) {
       {
         type: "button",
         style: "secondary",
-        height: "xl", // 高さ 約250%
+        height: "md", // Flex仕様上の最大
         flex: 1,
         action: {
           type: "postback",
