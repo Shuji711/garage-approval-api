@@ -64,7 +64,6 @@ async function sendApprovalMessage(pageId) {
         const proposalData = await proposalRes.json();
         const pProps = proposalData.properties || {};
 
-        // 議案番号（フォーミュラ or 通常プロパティ）
         const issueProp =
           pProps["議案番号フォーミュラ"] ||
           pProps["議案番号"] ||
@@ -75,7 +74,6 @@ async function sendApprovalMessage(pageId) {
           issueProp?.rich_text?.[0]?.plain_text ??
           "";
 
-        // 発議内容（内容（説明））を要約
         const descSource = pProps["内容（説明）"]?.rich_text;
         if (Array.isArray(descSource) && descSource.length > 0) {
           const fullText = descSource.map((r) => r.plain_text || "").join("");
@@ -83,7 +81,6 @@ async function sendApprovalMessage(pageId) {
             fullText.length > 120 ? fullText.slice(0, 120) + "…" : fullText;
         }
 
-        // 添付資料の有無 + URL
         const filesProp = pProps["添付資料"];
         if (filesProp && Array.isArray(filesProp.files) && filesProp.files.length > 0) {
           hasAttachment = true;
@@ -91,23 +88,20 @@ async function sendApprovalMessage(pageId) {
           attachmentUrl = f0.external?.url || f0.file?.url || "";
         }
 
-        // Notion 議案ページURL（IDのハイフンを外して生成）
         const cleanId = proposalPageId.replace(/-/g, "");
         proposalUrl = `https://www.notion.so/${cleanId}`;
       }
     }
   } catch (e) {
     console.error("Issue / proposal info fetch failed:", e);
-    // ここでエラーになっても承認依頼自体は送る
   }
 
   // --- 3. 承認票から LINE 送信先の取得 ---
   const memberRel = props["会員"]?.relation || [];
   const lineRollup = props["LINEユーザーID"];
-
   const lineUserIds = [];
 
-  // ① ロールアップから取得（標準ルート）
+  // ① ロールアップ
   if (lineRollup && lineRollup.type === "rollup") {
     const roll = lineRollup.rollup;
     if (roll && roll.type === "array" && Array.isArray(roll.array)) {
@@ -120,7 +114,7 @@ async function sendApprovalMessage(pageId) {
     }
   }
 
-  // ② 念のため、会員リレーション経由で補完（ロールアップが空の場合）
+  // ② 会員DB側補完
   if (lineUserIds.length === 0 && memberRel.length > 0) {
     for (const rel of memberRel) {
       const memberId = rel.id;
@@ -154,7 +148,7 @@ async function sendApprovalMessage(pageId) {
     };
   }
 
-  // --- 4. 承認URL・否認URL・LINEユーザーID文字列 を Notion に書き戻す ---
+  // --- 4. Notion へ approveURL/denyURL + LINEユーザーID文字列 を書き戻す ---
   const approveUrl = `https://approval.garagetsuno.org/approve?id=${pageId}`;
   const denyUrl = `https://approval.garagetsuno.org/deny?id=${pageId}`;
   const lineIdJoined = lineUserIds.join("\n");
@@ -171,7 +165,6 @@ async function sendApprovalMessage(pageId) {
         properties: {
           approveURL: { url: approveUrl },
           denyURL: { url: denyUrl },
-          // 承認票DB 側に rich_text プロパティ「LINEユーザーID文字列」を作成しておく
           LINEユーザーID文字列: {
             rich_text: [
               {
@@ -185,16 +178,12 @@ async function sendApprovalMessage(pageId) {
     });
   } catch (e) {
     console.error("Failed to write approve/deny URL or LINE IDs to Notion:", e);
-    // 書き込み失敗でも、LINE送信は続行
   }
 
-  // --- 5. LINE Flex メッセージ構築（レイアウト調整版） ---
-
-  // 「議案」欄に表示する1行（議案番号＋タイトル）
+  // --- 5. LINE Flex メッセージ構築 ---
   const agendaLine = issueNo ? `${issueNo}　${title}` : title;
 
   const bodyContents = [
-    // タイトル：承認依頼（中央揃え）
     {
       type: "text",
       text: "承認依頼",
@@ -202,40 +191,23 @@ async function sendApprovalMessage(pageId) {
       size: "lg",
       align: "center",
     },
-    // 議案ブロック
     {
       type: "box",
       layout: "vertical",
       margin: "md",
       spacing: "xs",
       contents: [
-        {
-          type: "text",
-          text: "議案",
-          weight: "bold",
-          size: "sm",
-        },
-        {
-          type: "text",
-          text: agendaLine,
-          size: "sm",
-          wrap: true,
-        },
+        { type: "text", text: "議案", weight: "bold", size: "sm" },
+        { type: "text", text: agendaLine, size: "sm", wrap: true },
       ],
     },
-    // 内容ブロック（議案との間を1行あけるイメージで margin を設定）
     {
       type: "box",
       layout: "vertical",
       margin: "md",
       spacing: "xs",
       contents: [
-        {
-          type: "text",
-          text: "内容",
-          weight: "bold",
-          size: "sm",
-        },
+        { type: "text", text: "内容", weight: "bold", size: "sm" },
         {
           type: "text",
           text: proposalSummary || "（内容未入力）",
@@ -246,7 +218,6 @@ async function sendApprovalMessage(pageId) {
     },
   ];
 
-  // 添付資料の有無表示
   if (hasAttachment) {
     bodyContents.push({
       type: "text",
@@ -256,10 +227,8 @@ async function sendApprovalMessage(pageId) {
     });
   }
 
-  // フッター（ボタン）
   const footerContents = [];
 
-  // Notion 議案ページを開くボタン（必要に応じて残す）
   if (proposalUrl) {
     footerContents.push({
       type: "button",
@@ -273,7 +242,6 @@ async function sendApprovalMessage(pageId) {
     });
   }
 
-  // 添付PDFを開くボタン
   if (hasAttachment && attachmentUrl) {
     footerContents.push({
       type: "button",
@@ -288,7 +256,6 @@ async function sendApprovalMessage(pageId) {
     });
   }
 
-  // 承認・否認ボタン（postback：確認カード用のフックにする）
   footerContents.push(
     {
       type: "button",
@@ -333,19 +300,38 @@ async function sendApprovalMessage(pageId) {
     },
   };
 
-  // --- 6. LINE に送信 ---
+  // --- 6. LINE に送信（ログ入り） ---
   for (const lineId of lineUserIds) {
-    await fetch("https://api.line.me/v2/bot/message/push", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${lineToken}`,
-      },
-      body: JSON.stringify({
+    try {
+      const res = await fetch("https://api.line.me/v2/bot/message/push", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${lineToken}`,
+        },
+        body: JSON.stringify({
+          to: lineId,
+          messages: [message],
+        }),
+      });
+
+      const text = await res.text();
+
+      console.log("LINE push response:", {
         to: lineId,
-        messages: [message],
-      }),
-    });
+        status: res.status,
+        body: text,
+      });
+
+      if (!res.ok) {
+        throw new Error(
+          `LINE push failed: ${res.status} ${text || res.statusText}`
+        );
+      }
+    } catch (e) {
+      console.error("LINE push exception:", e);
+      throw e;
+    }
   }
 
   return {
