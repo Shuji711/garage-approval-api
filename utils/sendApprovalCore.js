@@ -27,7 +27,7 @@ async function sendApprovalMessage(pageId) {
   const pageData = await pageRes.json();
   const props = pageData.properties || {};
 
-  // 承認票タイトル（名前）
+  // 承認票タイトル（ここでは「議案名」として扱う）
   const title =
     props["名前"]?.title?.[0]?.plain_text ||
     props["タイトル"]?.title?.[0]?.plain_text ||
@@ -37,6 +37,7 @@ async function sendApprovalMessage(pageId) {
   let issueNo = "";
   let proposalSummary = "";
   let hasAttachment = false;
+  let attachmentUrl = "";
   let proposalUrl = "";
 
   try {
@@ -77,19 +78,17 @@ async function sendApprovalMessage(pageId) {
         // 発議内容（内容（説明））を要約
         const descSource = pProps["内容（説明）"]?.rich_text;
         if (Array.isArray(descSource) && descSource.length > 0) {
-          const fullText = descSource
-            .map((r) => r.plain_text || "")
-            .join("");
+          const fullText = descSource.map((r) => r.plain_text || "").join("");
           proposalSummary =
-            fullText.length > 120
-              ? fullText.slice(0, 120) + "…"
-              : fullText;
+            fullText.length > 120 ? fullText.slice(0, 120) + "…" : fullText;
         }
 
-        // 添付資料の有無
+        // 添付資料の有無 + URL
         const filesProp = pProps["添付資料"];
-        if (filesProp && Array.isArray(filesProp.files)) {
-          hasAttachment = filesProp.files.length > 0;
+        if (filesProp && Array.isArray(filesProp.files) && filesProp.files.length > 0) {
+          hasAttachment = true;
+          const f0 = filesProp.files[0];
+          attachmentUrl = f0.external?.url || f0.file?.url || "";
         }
 
         // Notion 議案ページURL（IDのハイフンを外して生成）
@@ -179,53 +178,78 @@ async function sendApprovalMessage(pageId) {
     // URL書き込み失敗でも、LINE送信は続行
   }
 
-  // --- 5. LINE Flex メッセージ構築 ---
+  // --- 5. LINE Flex メッセージ構築（レイアウト調整版） ---
+
+  // 「議案」欄に表示する1行（議案番号＋タイトル）
+  const agendaLine = issueNo ? `${issueNo}　${title}` : title;
+
   const bodyContents = [
-    { type: "text", text: "承認依頼", weight: "bold", size: "lg" },
+    // タイトル：承認依頼（中央揃え）
+    {
+      type: "text",
+      text: "承認依頼",
+      weight: "bold",
+      size: "lg",
+      align: "center",
+    },
+    // 議案ブロック
+    {
+      type: "box",
+      layout: "vertical",
+      margin: "md",
+      spacing: "xs",
+      contents: [
+        {
+          type: "text",
+          text: "議案",
+          weight: "bold",
+          size: "sm",
+        },
+        {
+          type: "text",
+          text: agendaLine,
+          size: "sm",
+          wrap: true,
+        },
+      ],
+    },
+    // 内容ブロック（議案との間を1行あけるイメージで margin を設定）
+    {
+      type: "box",
+      layout: "vertical",
+      margin: "md",
+      spacing: "xs",
+      contents: [
+        {
+          type: "text",
+          text: "内容",
+          weight: "bold",
+          size: "sm",
+        },
+        {
+          type: "text",
+          text: proposalSummary || "（内容未入力）",
+          size: "sm",
+          wrap: true,
+        },
+      ],
+    },
   ];
 
-  if (issueNo) {
-    bodyContents.push({
-      type: "text",
-      text: `議案番号：${issueNo}`,
-      size: "sm",
-      margin: "md",
-    });
-  }
-
-  // 承認票タイトル
-  bodyContents.push({
-    type: "text",
-    text: title,
-    wrap: true,
-    margin: "md",
-  });
-
-  // 発議内容サマリ
-  if (proposalSummary) {
-    bodyContents.push({
-      type: "text",
-      text: proposalSummary,
-      wrap: true,
-      size: "sm",
-      margin: "sm",
-    });
-  }
-
-  // 添付資料の有無
+  // 添付資料の有無表示
   if (hasAttachment) {
     bodyContents.push({
       type: "text",
       text: "添付資料：あり",
       size: "xs",
-      margin: "sm",
+      margin: "md",
     });
   }
 
   // フッター（ボタン）
   const footerContents = [];
 
-  // 議案ページを開くボタン
+  // Notion 議案ページを開くボタン（必要に応じて残す）
   if (proposalUrl) {
     footerContents.push({
       type: "button",
@@ -235,21 +259,47 @@ async function sendApprovalMessage(pageId) {
         uri: proposalUrl,
       },
       style: "secondary",
+      height: "sm",
     });
   }
 
-  // 承認・否認ボタン
+  // 添付PDFを開くボタン
+  if (hasAttachment && attachmentUrl) {
+    footerContents.push({
+      type: "button",
+      action: {
+        type: "uri",
+        label: "添付資料（PDF）を開く",
+        uri: attachmentUrl,
+      },
+      style: "secondary",
+      height: "sm",
+      margin: "sm",
+    });
+  }
+
+  // 承認・否認ボタン（postback：確認カード用のフックにする）
   footerContents.push(
     {
       type: "button",
-      action: { type: "uri", label: "承認する", uri: approveUrl },
+      action: {
+        type: "postback",
+        label: "承認する",
+        data: `action=select&result=approve&pageId=${pageId}`,
+      },
       style: "primary",
+      height: "sm",
       margin: "md",
     },
     {
       type: "button",
-      action: { type: "uri", label: "否認する", uri: denyUrl },
+      action: {
+        type: "postback",
+        label: "否認する",
+        data: `action=select&result=deny&pageId=${pageId}`,
+      },
       style: "secondary",
+      height: "sm",
       margin: "md",
     }
   );
