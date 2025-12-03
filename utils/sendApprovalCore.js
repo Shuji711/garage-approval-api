@@ -184,3 +184,53 @@ async function sendApprovalMessage(pageId) {
     altText: "承認依頼があります",
     contents: {
       type: "bubble",
+      body: {
+        type: "box",
+        layout: "vertical",
+        contents: bodyContents,
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        contents: [
+          {
+            type: "button",
+            action: { type: "uri", label: "承認する", uri: approveUrl },
+            style: "primary",
+          },
+          {
+            type: "button",
+            action: { type: "uri", label: "否認する", uri: denyUrl },
+            style: "secondary",
+            margin: "md",
+          },
+        ],
+      },
+    },
+  };
+
+  // --- 7. LINE に送信 ---
+  for (const lineId of lineUserIds) {
+    await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${lineToken}`,
+      },
+      body: JSON.stringify({
+        to: lineId,
+        messages: [message],
+      }),
+    });
+  }
+
+  return {
+    ok: true,
+    sentTo: lineUserIds,
+    issueNo,
+  };
+}
+
+module.exports = {
+  sendApprovalMessage,
+};
