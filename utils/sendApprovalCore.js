@@ -1,6 +1,6 @@
 // /utils/sendApprovalCore.js
 // 承認票DB のページIDを受け取り、関連する議案情報を取得して
-// 承認依頼メッセージを LINE に送信する。
+// 承認依頼メッセージを LINE に送信する（内容・添付・Notionリンク付き）
 
 const { ensureIssueSequence } = require("./issueNumberCore");
 
@@ -27,13 +27,13 @@ async function sendApprovalMessage(pageId) {
   const pageData = await pageRes.json();
   const props = pageData.properties || {};
 
-  // --- 2. 承認票タイトル（名前） ---
+  // 承認票タイトル（名前）
   const title =
     props["名前"]?.title?.[0]?.plain_text ||
     props["タイトル"]?.title?.[0]?.plain_text ||
     "承認依頼";
 
-  // --- 3. 議案ページ関連情報の取得 ---
+  // --- 2. 議案ページ関連情報の取得 ---
   let issueNo = "";
   let proposalSummary = "";
   let hasAttachment = false;
@@ -44,10 +44,10 @@ async function sendApprovalMessage(pageId) {
     const proposalPageId = proposalRel[0]?.id;
 
     if (proposalPageId) {
-      // ① 議案番号の自動採番（未採番なら振る）
+      // (1) 議案番号の自動採番（未採番なら振る）
       await ensureIssueSequence(proposalPageId);
 
-      // ② 採番後の議案ページを再取得
+      // (2) 採番後の議案ページを再取得
       const proposalRes = await fetch(
         `https://api.notion.com/v1/pages/${proposalPageId}`,
         {
@@ -75,26 +75,11 @@ async function sendApprovalMessage(pageId) {
           "";
 
         // 発議内容（内容（説明））を要約
-        const descRich = pProps["内容（説明）」"]?.rich_text
-          || pProps["内容（説明）」"]?.rich_text; // 予備。名称揺れ対策
-        const descRich2 = pProps["内容（説明）」] || pProps["内容（説明)"];
-
-        let descSource =
-          pProps["内容（説明）」]?.rich_text ||
-          pProps["内容（説明）」]?.rich_text ||
-          pProps["内容（説明）」]?.rich_text ||
-          pProps["内容（説明）」]?.rich_text;
-
-        // 実際のプロパティ名「内容（説明）」向け
-        if (pProps["内容（説明）"]?.rich_text) {
-          descSource = pProps["内容（説明）"].rich_text;
-        }
-
+        const descSource = pProps["内容（説明）"]?.rich_text;
         if (Array.isArray(descSource) && descSource.length > 0) {
           const fullText = descSource
             .map((r) => r.plain_text || "")
             .join("");
-          // 長すぎると見づらいので適当にトリミング
           proposalSummary =
             fullText.length > 120
               ? fullText.slice(0, 120) + "…"
@@ -107,8 +92,7 @@ async function sendApprovalMessage(pageId) {
           hasAttachment = filesProp.files.length > 0;
         }
 
-        // Notion 議案ページを開くためのURL
-        // pageId からハイフンを抜いた32桁IDで Notion ページURLを作る
+        // Notion 議案ページURL（IDのハイフンを外して生成）
         const cleanId = proposalPageId.replace(/-/g, "");
         proposalUrl = `https://www.notion.so/${cleanId}`;
       }
@@ -118,29 +102,26 @@ async function sendApprovalMessage(pageId) {
     // ここでエラーになっても承認依頼自体は送る
   }
 
-  // --- 4. 承認票から LINE 送信先の取得 ---
-  // 承認票DB の「会員」リレーション ＋ 「LINEユーザーID」ロールアップ前提
+  // --- 3. 承認票から LINE 送信先の取得 ---
   const memberRel = props["会員"]?.relation || [];
   const lineRollup = props["LINEユーザーID"];
 
   const lineUserIds = [];
 
-  // ① ロールアップから直接取得（標準パス）
+  // ① ロールアップから取得（標準ルート）
   if (lineRollup && lineRollup.type === "rollup") {
     const roll = lineRollup.rollup;
     if (roll && roll.type === "array" && Array.isArray(roll.array)) {
       for (const item of roll.array) {
         if (item.type === "rich_text" && item.rich_text?.length) {
           const idText = item.rich_text[0].plain_text;
-          if (idText) {
-            lineUserIds.push(idText);
-          }
+          if (idText) lineUserIds.push(idText);
         }
       }
     }
   }
 
-  // ② 念のため、会員リレーション経由で補完（ロールアップが空の場合想定）
+  // ② 念のため、会員リレーション経由で補完（ロールアップが空の場合）
   if (lineUserIds.length === 0 && memberRel.length > 0) {
     for (const rel of memberRel) {
       const memberId = rel.id;
@@ -160,9 +141,7 @@ async function sendApprovalMessage(pageId) {
         const mProps = memberData.properties || {};
         const lineText =
           mProps["LINEユーザーID"]?.rich_text?.[0]?.plain_text || "";
-        if (lineText) {
-          lineUserIds.push(lineText);
-        }
+        if (lineText) lineUserIds.push(lineText);
       } catch (e) {
         console.error("Fetch member for LINE ID failed:", e);
       }
@@ -176,7 +155,7 @@ async function sendApprovalMessage(pageId) {
     };
   }
 
-  // --- 5. 承認URL・否認URL を生成して Notion に書き戻す ---
+  // --- 4. 承認URL・否認URL を生成して Notion に書き戻す ---
   const approveUrl = `https://approval.garagetsuno.org/approve?id=${pageId}`;
   const denyUrl = `https://approval.garagetsuno.org/deny?id=${pageId}`;
 
@@ -200,7 +179,7 @@ async function sendApprovalMessage(pageId) {
     // URL書き込み失敗でも、LINE送信は続行
   }
 
-  // --- 6. LINE Flex メッセージ構築 ---
+  // --- 5. LINE Flex メッセージ構築 ---
   const bodyContents = [
     { type: "text", text: "承認依頼", weight: "bold", size: "lg" },
   ];
@@ -214,7 +193,7 @@ async function sendApprovalMessage(pageId) {
     });
   }
 
-  // 承認票タイトル（中身は「議案名／安藤 修二」など）
+  // 承認票タイトル
   bodyContents.push({
     type: "text",
     text: title,
@@ -222,7 +201,7 @@ async function sendApprovalMessage(pageId) {
     margin: "md",
   });
 
-  // 発議内容のサマリ
+  // 発議内容サマリ
   if (proposalSummary) {
     bodyContents.push({
       type: "text",
@@ -294,7 +273,7 @@ async function sendApprovalMessage(pageId) {
     },
   };
 
-  // --- 7. LINE に送信 ---
+  // --- 6. LINE に送信 ---
   for (const lineId of lineUserIds) {
     await fetch("https://api.line.me/v2/bot/message/push", {
       method: "POST",
