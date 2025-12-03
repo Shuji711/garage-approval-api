@@ -1,6 +1,6 @@
 // /utils/sendApprovalCore.js
 
-import { ensureIssueSequence } from "@/utils/issueNumberCore";
+import { ensureIssueSequence } from "./issueNumberCore";
 
 export async function sendApprovalMessage(pageId) {
   const notionToken = process.env.NOTION_API_KEY;
