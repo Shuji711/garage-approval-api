@@ -4,14 +4,45 @@
 // - LINEのボタンからブラウザで開く
 // - フォームで コメント + 承認/否認（ラジオボタン）を選んで送信
 // - 承認票DBの「承認結果」「承認日時」「コメント（表示用）」を更新
+// - 画面上部に「議案」「内容」「発議者」「承認期限」「添付資料」を表示
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
 const querystring = require("querystring");
 
-// Notion ページ（承認票）のタイトルを取得（表示用）
-async function getPageTitle(pageId) {
-  const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+function formatJpDate(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return "";
+  const w = ["日", "月", "火", "水", "木", "金", "土"];
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日（${
+    w[d.getDay()]
+  }）`;
+}
+
+function deriveAttachmentLabel(url, index) {
+  try {
+    const withoutQuery = url.split(/[?#]/)[0];
+    const lastPart = withoutQuery.split("/").pop() || "";
+    const decoded = decodeURIComponent(lastPart);
+    if (decoded) return decoded;
+  } catch (e) {
+    // ignore
+  }
+  return `添付資料${index}`;
+}
+
+// Notion から 承認票＋関連議案の情報をまとめて取得
+async function fetchApprovalContext(pageId) {
+  let title = "承認票";
+  let issueNo = "";
+  let description = "";
+  let proposerNames = "";
+  let deadlineText = "";
+  const attachments = [];
+
+  // 承認票ページ
+  const pageRes = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     headers: {
       Authorization: `Bearer ${NOTION_API_KEY}`,
       "Notion-Version": NOTION_VERSION,
@@ -19,24 +50,149 @@ async function getPageTitle(pageId) {
     },
   });
 
-  if (!res.ok) {
-    return null;
+  if (!pageRes.ok) {
+    const txt = await pageRes.text();
+    throw new Error(
+      `Failed to fetch approval page: ${pageRes.status} ${
+        txt || pageRes.statusText
+      }`
+    );
   }
 
-  const data = await res.json();
-  const props = data.properties || {};
-  const nameProp = props["名前"];
+  const pageData = await pageRes.json();
+  const aProps = pageData.properties || {};
 
+  // 承認票タイトル
+  const aNameProp = aProps["名前"] || aProps["タイトル"];
   if (
-    nameProp &&
-    nameProp.type === "title" &&
-    Array.isArray(nameProp.title) &&
-    nameProp.title.length > 0
+    aNameProp &&
+    aNameProp.type === "title" &&
+    Array.isArray(aNameProp.title) &&
+    aNameProp.title.length > 0
   ) {
-    return nameProp.title[0].plain_text || "承認票";
+    title = aNameProp.title[0].plain_text || title;
   }
 
-  return "承認票";
+  // 関連する議案ページ
+  const proposalRel = aProps["議案"]?.relation || [];
+  const proposalPageId = proposalRel[0]?.id;
+
+  if (proposalPageId) {
+    try {
+      const proposalRes = await fetch(
+        `https://api.notion.com/v1/pages/${proposalPageId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${NOTION_API_KEY}`,
+            "Notion-Version": NOTION_VERSION,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      if (proposalRes.ok) {
+        const proposalData = await proposalRes.json();
+        const pProps = proposalData.properties || {};
+
+        // 議案タイトル（あればこちらを優先）
+        const pTitleProp = pProps["タイトル"] || pProps["名前"];
+        if (
+          pTitleProp &&
+          pTitleProp.type === "title" &&
+          Array.isArray(pTitleProp.title) &&
+          pTitleProp.title.length > 0
+        ) {
+          title = pTitleProp.title[0].plain_text || title;
+        }
+
+        // 議案番号
+        const issueProp =
+          pProps["議案番号フォーミュラ"] ||
+          pProps["議案番号"] ||
+          pProps["議案番号（自動）"];
+
+        issueNo =
+          issueProp?.formula?.string ??
+          issueProp?.rich_text?.[0]?.plain_text ??
+          "";
+
+        // 内容（説明） 全文（長くてもOK）
+        const descSource = pProps["内容（説明）"]?.rich_text;
+        if (Array.isArray(descSource) && descSource.length > 0) {
+          description = descSource.map((r) => r.plain_text || "").join("");
+        }
+
+        // 発議者（会員DBへのリレーション想定）
+        const proposerRel = pProps["発議者"]?.relation || [];
+        const proposerList = [];
+        for (const rel of proposerRel) {
+          const memberId = rel.id;
+          try {
+            const memberRes = await fetch(
+              `https://api.notion.com/v1/pages/${memberId}`,
+              {
+                headers: {
+                  Authorization: `Bearer ${NOTION_API_KEY}`,
+                  "Notion-Version": NOTION_VERSION,
+                  "Content-Type": "application/json",
+                },
+              }
+            );
+            if (!memberRes.ok) continue;
+            const memberData = await memberRes.json();
+            const mProps = memberData.properties || {};
+            const mNameProp =
+              mProps["氏名"] || mProps["名前"] || mProps["タイトル"];
+            let memberName = "";
+            if (
+              mNameProp &&
+              mNameProp.type === "title" &&
+              Array.isArray(mNameProp.title) &&
+              mNameProp.title.length > 0
+            ) {
+              memberName = mNameProp.title[0].plain_text || "";
+            }
+            if (memberName) proposerList.push(memberName);
+          } catch (e) {
+            console.error("Fetch proposer failed:", e);
+          }
+        }
+        if (proposerList.length > 0) {
+          proposerNames = proposerList.join("、");
+        }
+
+        // 承認期限（日付プロパティ）
+        const deadlineProp =
+          pProps["承認期限"]?.date || pProps["期限"]?.date || null;
+        const deadlineStart = deadlineProp?.start;
+        if (deadlineStart) {
+          deadlineText = formatJpDate(deadlineStart);
+        }
+
+        // 添付資料 URL（「添付リンク」で始まるURLプロパティをすべて拾う）
+        let attachIndex = 1;
+        for (const [name, prop] of Object.entries(pProps)) {
+          if (!name.startsWith("添付リンク")) continue;
+          if (prop && prop.type === "url" && prop.url) {
+            const url = prop.url;
+            const label = deriveAttachmentLabel(url, attachIndex++);
+            attachments.push({ url, label });
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Fetch proposal page failed:", e);
+    }
+  }
+
+  return {
+    title,
+    issueNo,
+    description,
+    proposerNames,
+    deadlineText,
+    attachments,
+  };
 }
 
 // 承認結果を Notion に反映する
@@ -89,10 +245,42 @@ async function updateApproval(pageId, resultKey, commentText) {
 }
 
 // 承認フォーム HTML（GET用）
-function renderFormHtml({ pageId, title, presetResult }) {
-  const safeTitle = title || "承認依頼";
+function renderFormHtml({
+  pageId,
+  title,
+  issueNo,
+  description,
+  proposerNames,
+  deadlineText,
+  attachments,
+  presetResult,
+}) {
+  const agendaTitle = issueNo ? `${issueNo}　${title}` : title || "承認依頼";
   const approveChecked = presetResult === "approve" ? "checked" : "";
   const denyChecked = presetResult === "deny" ? "checked" : "";
+  const safeDescription =
+    description ||
+    "（内容が登録されていません。必要に応じて担当者へご確認ください。）";
+  const proposerText = proposerNames || "（発議者情報が登録されていません）";
+  const deadlineTextDisplay = deadlineText || "（期限の指定はありません）";
+
+  let attachmentsHtml = "";
+  if (attachments && attachments.length > 0) {
+    const items = attachments
+      .map(
+        (a) =>
+          `<li class="attach-item"><a href="${a.url}" target="_blank" rel="noopener noreferrer">${escapeHtml(
+            a.label
+          )}</a></li>`
+      )
+      .join("");
+    attachmentsHtml = `
+      <div class="section-title">添付資料</div>
+      <ul class="attach-list">
+        ${items}
+      </ul>
+    `;
+  }
 
   return `<!doctype html>
 <html lang="ja">
@@ -102,7 +290,7 @@ function renderFormHtml({ pageId, title, presetResult }) {
     name="viewport"
     content="width=device-width,initial-scale=1,viewport-fit=cover"
   />
-  <title>${safeTitle} - 承認フォーム</title>
+  <title>${agendaTitle} - 承認フォーム</title>
   <style>
     :root {
       color-scheme: light;
@@ -125,7 +313,7 @@ function renderFormHtml({ pageId, title, presetResult }) {
       padding: 24px 16px;
     }
     .card {
-      max-width: 640px;
+      max-width: 720px;
       width: 100%;
       background-color: #ffffff;
       border-radius: 12px;
@@ -148,13 +336,47 @@ function renderFormHtml({ pageId, title, presetResult }) {
       font-weight: 600;
       margin: 20px 0 8px;
     }
-    .notice {
-      font-size: 15px;
+    .info-box {
+      border-radius: 10px;
+      border: 1px solid #dddddd;
+      background-color: #fafafa;
+      padding: 12px 14px;
+      font-size: 16px;
+    }
+    .info-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .info-label {
+      min-width: 72px;
+      font-weight: 600;
       color: #555555;
-      background-color: #f0f4ff;
-      border-radius: 8px;
-      padding: 10px 12px;
-      margin-bottom: 16px;
+    }
+    .info-value {
+      flex: 1;
+    }
+    .text-box {
+      border-radius: 10px;
+      border: 1px solid #dddddd;
+      background-color: #ffffff;
+      padding: 12px 14px;
+      font-size: 16px;
+      white-space: pre-wrap;
+    }
+    .attach-list {
+      margin: 0;
+      padding-left: 20px;
+      list-style: disc;
+      font-size: 16px;
+    }
+    .attach-item + .attach-item {
+      margin-top: 4px;
+    }
+    .attach-list a {
+      color: #2f6fdd;
+      text-decoration: underline;
     }
     textarea {
       width: 100%;
@@ -250,13 +472,37 @@ function renderFormHtml({ pageId, title, presetResult }) {
 <body>
 <div class="page">
   <div class="card">
-    <h1 class="title">${safeTitle}</h1>
+    <h1 class="title">${agendaTitle}</h1>
     <p class="subtitle">内容をご確認のうえ、「承認」または「否認」を選択し、コメントがあれば入力して「送信」してください。</p>
 
-    <div class="notice">
-      <strong>ご案内</strong><br />
-      議案の詳細や添付資料は、別途お送りしている資料・Notionページをご確認ください。
+    <div class="section-title">議案</div>
+    <div class="info-box">
+      <div class="info-row">
+        <div class="info-label">議案名</div>
+        <div class="info-value">${escapeHtml(title)}</div>
+      </div>
+      <div class="info-row">
+        <div class="info-label">議案番号</div>
+        <div class="info-value">${issueNo ? escapeHtml(issueNo) : "（未設定）"}</div>
+      </div>
     </div>
+
+    <div class="section-title">発議者</div>
+    <div class="info-box">
+      ${escapeHtml(proposerText)}
+    </div>
+
+    <div class="section-title">承認期限</div>
+    <div class="info-box">
+      ${escapeHtml(deadlineTextDisplay)}
+    </div>
+
+    <div class="section-title">内容</div>
+    <div class="text-box">
+      ${escapeHtml(safeDescription)}
+    </div>
+
+    ${attachmentsHtml}
 
     <form method="POST" action="/api/approve">
       <input type="hidden" name="id" value="${pageId}" />
@@ -293,7 +539,8 @@ function renderFormHtml({ pageId, title, presetResult }) {
     </form>
 
     <div class="footer">
-      この画面を閉じるときは、端末の「戻る」ボタンやブラウザのタブを閉じてください。
+      この画面を閉じても処理は完了しています。<br/>
+      必要に応じて、担当者へご確認ください。
     </div>
   </div>
 </div>
@@ -302,8 +549,8 @@ function renderFormHtml({ pageId, title, presetResult }) {
 }
 
 // 完了画面 HTML（POST後）
-function renderResultHtml({ title, resultKey, comment }) {
-  const safeTitle = title || "承認票";
+function renderResultHtml({ title, issueNo, resultKey, comment }) {
+  const agendaTitle = issueNo ? `${issueNo}　${title}` : title || "承認票";
   const isApprove = resultKey === "approve";
   const resultLabel = isApprove ? "承認" : "否認";
   const resultColor = isApprove ? "#2f6fdd" : "#c0392b";
@@ -322,7 +569,7 @@ function renderResultHtml({ title, resultKey, comment }) {
     name="viewport"
     content="width=device-width,initial-scale=1,viewport-fit=cover"
   />
-  <title>${safeTitle} - 処理完了</title>
+  <title>${agendaTitle} - 処理完了</title>
   <style>
     body {
       margin: 0;
@@ -342,7 +589,7 @@ function renderResultHtml({ title, resultKey, comment }) {
       padding: 24px 16px;
     }
     .card {
-      max-width: 640px;
+      max-width: 720px;
       width: 100%;
       background-color: #ffffff;
       border-radius: 12px;
@@ -395,7 +642,7 @@ function renderResultHtml({ title, resultKey, comment }) {
 <div class="page">
   <div class="card">
     <div class="result-chip">${resultLabel} が登録されました</div>
-    <h1 class="title">${safeTitle}</h1>
+    <h1 class="title">${agendaTitle}</h1>
 
     ${commentBlock}
 
@@ -413,7 +660,7 @@ function renderResultHtml({ title, resultKey, comment }) {
 function escapeHtml(str) {
   return String(str)
     .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
+    .replace(/</g, "&lt/")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
@@ -429,10 +676,10 @@ module.exports = async (req, res) => {
     }
 
     try {
-      const title = await getPageTitle(id);
+      const ctx = await fetchApprovalContext(id);
       const html = renderFormHtml({
         pageId: id,
-        title,
+        ...ctx,
         // もしクエリで result=approve/deny が来ていれば事前選択する
         presetResult: result === "approve" || result === "deny" ? result : null,
       });
@@ -469,10 +716,10 @@ module.exports = async (req, res) => {
     }
 
     try {
+      const ctx = await fetchApprovalContext(pageId);
       await updateApproval(pageId, resultKey, comment);
-      const title = await getPageTitle(pageId);
       const html = renderResultHtml({
-        title,
+        ...ctx,
         resultKey,
         comment,
       });
