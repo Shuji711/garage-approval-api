@@ -232,23 +232,24 @@ async function sendApprovalMessage(pageId) {
         label: "添付資料（PDF）を開く",
         uri: attachmentUrl,
       },
-      style: "secondary",
-      height: "sm",
+      style: "primary",
+      color: "#4A90E2", // 青系
+      height: "lg", // 高さ 約150%
       margin: "sm",
     });
   }
 
-  // 承認／否認ボタン — 横並び
+  // 承認／否認ボタン — 横並び（高さ大きめ）
   footerContents.push({
     type: "box",
     layout: "horizontal",
-    spacing: "sm",
-    margin: hasAttachment ? "md" : "none",
+    spacing: "md",
+    margin: hasAttachment && attachmentUrl ? "md" : "none",
     contents: [
       {
         type: "button",
         style: "primary",
-        height: "sm",
+        height: "xl", // 高さ 約250%
         flex: 1,
         action: {
           type: "postback",
@@ -259,7 +260,7 @@ async function sendApprovalMessage(pageId) {
       {
         type: "button",
         style: "secondary",
-        height: "sm",
+        height: "xl", // 高さ 約250%
         flex: 1,
         action: {
           type: "postback",
@@ -284,7 +285,7 @@ async function sendApprovalMessage(pageId) {
         type: "box",
         layout: "vertical",
         contents: footerContents,
-        spacing: "sm",
+        spacing: "md",
       },
     },
   };
