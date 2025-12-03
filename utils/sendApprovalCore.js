@@ -154,9 +154,10 @@ async function sendApprovalMessage(pageId) {
     };
   }
 
-  // --- 4. 承認URL・否認URL を生成して Notion に書き戻す ---
+  // --- 4. 承認URL・否認URL・LINEユーザーID文字列 を Notion に書き戻す ---
   const approveUrl = `https://approval.garagetsuno.org/approve?id=${pageId}`;
   const denyUrl = `https://approval.garagetsuno.org/deny?id=${pageId}`;
+  const lineIdJoined = lineUserIds.join("\n");
 
   try {
     await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
@@ -170,12 +171,21 @@ async function sendApprovalMessage(pageId) {
         properties: {
           approveURL: { url: approveUrl },
           denyURL: { url: denyUrl },
+          // 承認票DB 側に rich_text プロパティ「LINEユーザーID文字列」を作成しておく
+          LINEユーザーID文字列: {
+            rich_text: [
+              {
+                type: "text",
+                text: { content: lineIdJoined },
+              },
+            ],
+          },
         },
       }),
     });
   } catch (e) {
-    console.error("Failed to write approve/deny URL to Notion:", e);
-    // URL書き込み失敗でも、LINE送信は続行
+    console.error("Failed to write approve/deny URL or LINE IDs to Notion:", e);
+    // 書き込み失敗でも、LINE送信は続行
   }
 
   // --- 5. LINE Flex メッセージ構築（レイアウト調整版） ---
