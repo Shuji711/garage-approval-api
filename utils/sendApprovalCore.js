@@ -1,6 +1,6 @@
 // /utils/sendApprovalCore.js
 // 承認票DB のページIDを受け取り、関連する議案情報を取得して
-// 承認依頼メッセージを LINE に送信する（内容・添付リンク・Notionリンク付き）
+// 承認依頼メッセージを LINE に送信する（内容・添付リンク付き）
 
 const { ensureIssueSequence } = require("./issueNumberCore");
 
@@ -83,7 +83,7 @@ async function sendApprovalMessage(pageId) {
             fullText.length > 120 ? fullText.slice(0, 120) + "…" : fullText;
         }
 
-        // 🔹 添付リンク（Googleドライブ等） — NotionのURLプロパティだけを見る
+        // 添付リンク（Googleドライブ等） — NotionのURLプロパティだけを見る
         const linkProp = pProps["添付リンク"];
         if (linkProp && linkProp.type === "url" && linkProp.url) {
           hasAttachment = true;
@@ -221,30 +221,9 @@ async function sendApprovalMessage(pageId) {
     },
   ];
 
-  if (hasAttachment) {
-    bodyContents.push({
-      type: "text",
-      text: "添付資料：あり（外部リンク）",
-      size: "xs",
-      margin: "md",
-    });
-  }
-
   const footerContents = [];
 
-  if (proposalUrl) {
-    footerContents.push({
-      type: "button",
-      action: {
-        type: "uri",
-        label: "内容を確認する（Notion）",
-        uri: proposalUrl,
-      },
-      style: "secondary",
-      height: "sm",
-    });
-  }
-
+  // PDFボタン（縦に1つ）— 添付リンクがある場合だけ
   if (hasAttachment && attachmentUrl) {
     footerContents.push({
       type: "button",
@@ -259,30 +238,37 @@ async function sendApprovalMessage(pageId) {
     });
   }
 
-  footerContents.push(
-    {
-      type: "button",
-      action: {
-        type: "postback",
-        label: "承認する",
-        data: `action=select&result=approve&pageId=${pageId}`,
+  // 承認／否認ボタン — 横並び
+  footerContents.push({
+    type: "box",
+    layout: "horizontal",
+    spacing: "sm",
+    margin: hasAttachment ? "md" : "none",
+    contents: [
+      {
+        type: "button",
+        style: "primary",
+        height: "sm",
+        flex: 1,
+        action: {
+          type: "postback",
+          label: "承認する",
+          data: `action=select&result=approve&pageId=${pageId}`,
+        },
       },
-      style: "primary",
-      height: "sm",
-      margin: "md",
-    },
-    {
-      type: "button",
-      action: {
-        type: "postback",
-        label: "否認する",
-        data: `action=select&result=deny&pageId=${pageId}`,
+      {
+        type: "button",
+        style: "secondary",
+        height: "sm",
+        flex: 1,
+        action: {
+          type: "postback",
+          label: "否認する",
+          data: `action=select&result=deny&pageId=${pageId}`,
+        },
       },
-      style: "secondary",
-      height: "sm",
-      margin: "md",
-    }
-  );
+    ],
+  });
 
   const message = {
     type: "flex",
