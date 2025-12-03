@@ -1,8 +1,8 @@
 // /api/sendApproval.js
 
-import { sendApprovalMessage } from "../utils/sendApprovalCore";
+const { sendApprovalMessage } = require("../utils/sendApprovalCore");
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   if (req.method !== "GET") {
     return res.status(405).json({
       status: "error",
@@ -26,6 +26,7 @@ export default async function handler(req, res) {
       return res.status(400).json({
         status: "error",
         message: result.error || "Failed to send approval message",
+        debug: result.debug || null,
       });
     }
 
@@ -40,4 +41,4 @@ export default async function handler(req, res) {
       message: e.message || "Internal server error",
     });
   }
-}
+};
