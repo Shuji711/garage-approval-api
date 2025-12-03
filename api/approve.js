@@ -3,12 +3,14 @@
 // 承認フォーム表示（GET）＋ 承認結果反映（POST）
 // - LINEのボタンからブラウザで開く
 // - フォームで コメント + 承認/否認（ラジオボタン）を選んで送信
-// - 承認票DBの「承認結果」「承認日時」「コメント（表示用）」を更新
+// - 承認票DBの「承認結果」「承認日時」、あればコメント系プロパティを更新
 // - 画面上部に「議案」「内容」「発議者」「承認期限」「添付資料」を表示
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
 const querystring = require("querystring");
+
+// ---- 共通ユーティリティ ----
 
 function formatJpDate(dateStr) {
   if (!dateStr) return "";
@@ -32,7 +34,17 @@ function deriveAttachmentLabel(url, index) {
   return `添付資料${index}`;
 }
 
-// Notion から 承認票＋関連議案の情報をまとめて取得
+// 簡易エスケープ
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// ---- Notion から承認票+議案情報を取得 ----
+
 async function fetchApprovalContext(pageId) {
   let title = "承認票";
   let issueNo = "";
@@ -116,7 +128,7 @@ async function fetchApprovalContext(pageId) {
           issueProp?.rich_text?.[0]?.plain_text ??
           "";
 
-        // 内容（説明） 全文（長くてもOK）
+        // 内容（説明） 全文
         const descSource = pProps["内容（説明）"]?.rich_text;
         if (Array.isArray(descSource) && descSource.length > 0) {
           description = descSource.map((r) => r.plain_text || "").join("");
@@ -195,38 +207,83 @@ async function fetchApprovalContext(pageId) {
   };
 }
 
-// 承認結果を Notion に反映する
+// ---- 承認結果を Notion に反映 ----
+// コメント用プロパティ名は動的に判定（存在しない名前では書きに行かない）
+
 async function updateApproval(pageId, resultKey, commentText) {
   const now = new Date().toISOString();
+
+  // 承認票ページを取得して、存在するプロパティ名を確認
+  const pageRes = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+    headers: {
+      Authorization: `Bearer ${NOTION_API_KEY}`,
+      "Notion-Version": NOTION_VERSION,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!pageRes.ok) {
+    const txt = await pageRes.text();
+    throw new Error(
+      `Failed to fetch page for update: ${pageRes.status} ${
+        txt || pageRes.statusText
+      }`
+    );
+  }
+
+  const pageData = await pageRes.json();
+  const props = pageData.properties || {};
+
+  // コメント系プロパティ候補
+  const candidateNames = ["コメント（表示用）", "コメント", "コメント（表示）"];
+
+  let commentPropName = null;
+  for (const name of candidateNames) {
+    if (props[name] && props[name].type === "rich_text") {
+      commentPropName = name;
+      break;
+    }
+  }
+
+  // 承認結果プロパティが存在していないと困るので存在チェック（エラーのままにする）
+  if (!props["承認結果"] || props["承認結果"].type !== "select") {
+    throw new Error('Notion page is missing expected property: "承認結果"');
+  }
+  if (!props["承認日時"] || props["承認日時"].type !== "date") {
+    throw new Error('Notion page is missing expected property: "承認日時"');
+  }
 
   // resultKey: "approve" | "deny"
   const resultName = resultKey === "approve" ? "承認" : "否認";
 
-  const body = {
-    properties: {
-      // セレクトプロパティ「承認結果」に "承認" / "否認" を入れる
-      "承認結果": {
-        select: { name: resultName },
-      },
-      // 日付プロパティ「承認日時」に実行時刻を入れる
-      "承認日時": {
-        date: { start: now },
-      },
-      // リッチテキストプロパティ「コメント（表示用）」にコメントを入れる
-      "コメント（表示用）": {
-        rich_text: commentText
-          ? [
-              {
-                type: "text",
-                text: {
-                  content: commentText,
-                },
-              },
-            ]
-          : [],
-      },
+  const updateProps = {
+    // セレクトプロパティ「承認結果」に "承認" / "否認" を入れる
+    承認結果: {
+      select: { name: resultName },
+    },
+    // 日付プロパティ「承認日時」に実行時刻を入れる
+    承認日時: {
+      date: { start: now },
     },
   };
+
+  // コメントプロパティがある場合だけ追加
+  if (commentPropName) {
+    updateProps[commentPropName] = {
+      rich_text: commentText
+        ? [
+            {
+              type: "text",
+              text: {
+                content: commentText,
+              },
+            },
+          ]
+        : [],
+    };
+  }
+
+  const body = { properties: updateProps };
 
   const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "PATCH",
@@ -244,7 +301,8 @@ async function updateApproval(pageId, resultKey, commentText) {
   }
 }
 
-// 承認フォーム HTML（GET用）
+// ---- 承認フォーム HTML（GET） ----
+
 function renderFormHtml({
   pageId,
   title,
@@ -548,7 +606,8 @@ function renderFormHtml({
 </html>`;
 }
 
-// 完了画面 HTML（POST後）
+// ---- 完了画面 HTML（POST） ----
+
 function renderResultHtml({ title, issueNo, resultKey, comment }) {
   const agendaTitle = issueNo ? `${issueNo}　${title}` : title || "承認票";
   const isApprove = resultKey === "approve";
@@ -656,14 +715,7 @@ function renderResultHtml({ title, issueNo, resultKey, comment }) {
 </html>`;
 }
 
-// 簡易エスケープ
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt/")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
+// ---- エンドポイント本体 ----
 
 module.exports = async (req, res) => {
   const { method } = req;
