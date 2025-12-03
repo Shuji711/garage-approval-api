@@ -28,7 +28,7 @@ export async function sendApprovalMessage(pageId) {
   const title =
     pageData.properties["名前"]?.title?.[0]?.plain_text || "承認依頼";
 
-  // --- 2.5 議案番号の取得（議案DB 側で自動採番） ---
+  // --- 2.5 議案番号の取得 ---
   let issueNo = "";
 
   try {
@@ -69,8 +69,9 @@ export async function sendApprovalMessage(pageId) {
   // --- 3. LINEユーザーID の取得 ---
   const lineUserIds = [];
 
-  // 3-1. 承認票DB のロールアップ「LINEユーザーID」を優先的に使う
+  // --- 3-1. 承認票DBのロールアップ「LINEユーザーID」を優先的に使う ---
   const lineRollupProp = pageData.properties["LINEユーザーID"];
+
   if (lineRollupProp?.type === "rollup" && lineRollupProp.rollup) {
     const roll = lineRollupProp.rollup;
 
@@ -83,12 +84,10 @@ export async function sendApprovalMessage(pageId) {
           "";
         if (val) lineUserIds.push(val);
       }
-    } else if (roll.type === "number" || roll.type === "date") {
-      // 今回は想定外だが念のため無視
     }
   }
 
-  // 3-2. ロールアップで取れなかった場合は「会員」リレーションから会員DBを直接読む
+  // --- 3-2. ロールアップで取得できなかった場合 → 会員リレーションから取得 ---
   if (lineUserIds.length === 0) {
     const memberRelation = pageData.properties["会員"]?.relation || [];
 
@@ -96,135 +95,4 @@ export async function sendApprovalMessage(pageId) {
       const memberId = member.id;
 
       const memberRes = await fetch(
-        `https://api.notion.com/v1/pages/${memberId}`,
-        {
-          headers: {
-            Authorization: `Bearer ${notionToken}`,
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      if (!memberRes.ok) continue;
-
-      const memberData = await memberRes.json();
-
-      const lineProp = memberData.properties["LINEユーザーID"];
-      let lineId = "";
-
-      if (lineProp) {
-        lineId =
-          lineProp.rich_text?.[0]?.plain_text ??
-          lineProp.title?.[0]?.plain_text ??
-          lineProp.formula?.string ??
-          "";
-      }
-
-      if (lineId) {
-        lineUserIds.push(lineId);
-      } else {
-        console.error(
-          "LINEユーザーID property found but no value on member:",
-          JSON.stringify(lineProp, null, 2)
-        );
-      }
-    }
-  }
-
-  if (lineUserIds.length === 0) {
-    return { ok: false, error: "LINEユーザーID を取得できませんでした。" };
-  }
-
-  // --- 4. 承認URL・否認URL を生成 ---
-  const approveUrl = `https://approval.garagetsuno.org/approve?id=${pageId}`;
-  const denyUrl = `https://approval.garagetsuno.org/deny?id=${pageId}`;
-
-  // --- 5. Notion に URL を書き込む（プロパティ名：approveURL / denyURL） ---
-  await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${notionToken}`,
-      "Notion-Version": "2022-06-28",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      properties: {
-        approveURL: { url: approveUrl },
-        denyURL: { url: denyUrl },
-      },
-    }),
-  });
-
-  // --- 6. LINE メッセージ内容（Flex） ---
-  const bodyContents = [
-    { type: "text", text: "承認依頼", weight: "bold", size: "lg" },
-  ];
-
-  if (issueNo) {
-    bodyContents.push({
-      type: "text",
-      text: `議案番号：${issueNo}`,
-      size: "sm",
-      margin: "md",
-    });
-  }
-
-  bodyContents.push({
-    type: "text",
-    text: title,
-    wrap: true,
-    margin: "md",
-  });
-
-  const message = {
-    type: "flex",
-    altText: "承認依頼があります",
-    contents: {
-      type: "bubble",
-      body: {
-        type: "box",
-        layout: "vertical",
-        contents: bodyContents,
-      },
-      footer: {
-        type: "box",
-        layout: "vertical",
-        contents: [
-          {
-            type: "button",
-            action: { type: "uri", label: "承認する", uri: approveUrl },
-            style: "primary",
-          },
-          {
-            type: "button",
-            action: { type: "uri", label: "否認する", uri: denyUrl },
-            style: "secondary",
-            margin: "md",
-          },
-        ],
-      },
-    },
-  };
-
-  // --- 7. LINE に送信 ---
-  for (const lineId of lineUserIds) {
-    await fetch("https://api.line.me/v2/bot/message/push", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${lineToken}`,
-      },
-      body: JSON.stringify({
-        to: lineId,
-        messages: [message],
-      }),
-    });
-  }
-
-  return {
-    ok: true,
-    sentTo: lineUserIds,
-    issueNo,
-  };
-}
+        `https:/
