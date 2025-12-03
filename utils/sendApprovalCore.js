@@ -152,6 +152,7 @@ async function sendApprovalMessage(pageId) {
   }
 
   // --- 4. Notion に approveURL / denyURL / LINEユーザーID文字列 を書き戻す ---
+  // ※ 実際に使うのは approveURL（ブラウザのフォームへの入口）
   const approveUrl = `https://approval.garagetsuno.org/approve?id=${pageId}`;
   const denyUrl = `https://approval.garagetsuno.org/deny?id=${pageId}`;
   const lineIdJoined = lineUserIds.join("\n");
@@ -223,7 +224,7 @@ async function sendApprovalMessage(pageId) {
 
   const footerContents = [];
 
-  // PDFボタン（縦に1つ）— 添付リンクがある場合だけ
+  // 添付資料ボタン（ある場合だけ）
   if (hasAttachment && attachmentUrl) {
     footerContents.push({
       type: "button",
@@ -234,41 +235,22 @@ async function sendApprovalMessage(pageId) {
       },
       style: "primary",
       color: "#4A90E2", // 青系
-      height: "md", // 有効値: "sm" or "md"
+      height: "md",
       margin: "sm",
     });
   }
 
-  // 承認／否認ボタン — 横並び
+  // 承認フォームへ遷移するボタン（ここからブラウザのコメント入力画面へ）
   footerContents.push({
-    type: "box",
-    layout: "horizontal",
-    spacing: "md",
+    type: "button",
+    style: "primary",
+    height: "md",
     margin: hasAttachment && attachmentUrl ? "md" : "none",
-    contents: [
-      {
-        type: "button",
-        style: "primary",
-        height: "md", // Flex仕様上の最大
-        flex: 1,
-        action: {
-          type: "postback",
-          label: "承認する",
-          data: `action=select&result=approve&pageId=${pageId}`,
-        },
-      },
-      {
-        type: "button",
-        style: "secondary",
-        height: "md", // Flex仕様上の最大
-        flex: 1,
-        action: {
-          type: "postback",
-          label: "否認する",
-          data: `action=select&result=deny&pageId=${pageId}`,
-        },
-      },
-    ],
+    action: {
+      type: "uri",
+      label: "内容を確認して承認・否認する",
+      uri: approveUrl,
+    },
   });
 
   const message = {
