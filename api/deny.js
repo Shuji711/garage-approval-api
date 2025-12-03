@@ -1,5 +1,3 @@
-// api/deny.js
-
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
 
