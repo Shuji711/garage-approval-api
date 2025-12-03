@@ -1,8 +1,18 @@
 // /utils/sendApprovalCore.js
 // 承認票DB のページIDを受け取り、関連する議案情報を取得して
-// 承認依頼メッセージを LINE に送信する（内容・添付リンク付き）
+// 承認依頼メッセージを LINE に送信する（概要のみ）
 
 const { ensureIssueSequence } = require("./issueNumberCore");
+
+function formatJpDate(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return "";
+  const w = ["日", "月", "火", "水", "木", "金", "土"];
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日（${
+    w[d.getDay()]
+  }）`;
+}
 
 async function sendApprovalMessage(pageId) {
   const notionToken = process.env.NOTION_API_KEY;
@@ -36,8 +46,8 @@ async function sendApprovalMessage(pageId) {
   // --- 2. 議案ページ関連情報の取得 ---
   let issueNo = "";
   let proposalSummary = "";
-  let hasAttachment = false;
-  let attachmentUrl = "";
+  let proposerNames = "";
+  let deadlineText = "";
   let proposalUrl = "";
 
   try {
@@ -83,11 +93,51 @@ async function sendApprovalMessage(pageId) {
             fullText.length > 120 ? fullText.slice(0, 120) + "…" : fullText;
         }
 
-        // 添付リンク（Googleドライブ等） — NotionのURLプロパティだけを見る
-        const linkProp = pProps["添付リンク"];
-        if (linkProp && linkProp.type === "url" && linkProp.url) {
-          hasAttachment = true;
-          attachmentUrl = linkProp.url;
+        // 発議者（会員DBへのリレーション想定）
+        const proposerRel = pProps["発議者"]?.relation || [];
+        const proposerList = [];
+        for (const rel of proposerRel) {
+          const memberId = rel.id;
+          try {
+            const memberRes = await fetch(
+              `https://api.notion.com/v1/pages/${memberId}`,
+              {
+                headers: {
+                  Authorization: `Bearer ${notionToken}`,
+                  "Notion-Version": "2022-06-28",
+                  "Content-Type": "application/json",
+                },
+              }
+            );
+            if (!memberRes.ok) continue;
+            const memberData = await memberRes.json();
+            const mProps = memberData.properties || {};
+            const mNameProp =
+              mProps["氏名"] || mProps["名前"] || mProps["タイトル"];
+            let memberName = "";
+            if (
+              mNameProp &&
+              mNameProp.type === "title" &&
+              Array.isArray(mNameProp.title) &&
+              mNameProp.title.length > 0
+            ) {
+              memberName = mNameProp.title[0].plain_text || "";
+            }
+            if (memberName) proposerList.push(memberName);
+          } catch (e) {
+            console.error("Fetch proposer for LINE failed:", e);
+          }
+        }
+        if (proposerList.length > 0) {
+          proposerNames = proposerList.join("、");
+        }
+
+        // 承認期限（日付プロパティ）
+        const deadlineProp =
+          pProps["承認期限"]?.date || pProps["期限"]?.date || null;
+        const deadlineStart = deadlineProp?.start;
+        if (deadlineStart) {
+          deadlineText = formatJpDate(deadlineStart);
         }
 
         // Notion 議案ページURL（IDのハイフンを外して生成）
@@ -152,7 +202,6 @@ async function sendApprovalMessage(pageId) {
   }
 
   // --- 4. Notion に approveURL / denyURL / LINEユーザーID文字列 を書き戻す ---
-  // ※ 実際に使うのは approveURL（ブラウザのフォームへの入口）
   const approveUrl = `https://approval.garagetsuno.org/approve?id=${pageId}`;
   const denyUrl = `https://approval.garagetsuno.org/deny?id=${pageId}`;
   const lineIdJoined = lineUserIds.join("\n");
@@ -220,37 +269,62 @@ async function sendApprovalMessage(pageId) {
         },
       ],
     },
+    {
+      type: "box",
+      layout: "vertical",
+      margin: "md",
+      spacing: "xs",
+      contents: [
+        { type: "text", text: "発議者", weight: "bold", size: "sm" },
+        {
+          type: "text",
+          text: proposerNames || "（発議者情報なし）",
+          size: "sm",
+          wrap: true,
+        },
+      ],
+    },
+    {
+      type: "box",
+      layout: "vertical",
+      margin: "md",
+      spacing: "xs",
+      contents: [
+        { type: "text", text: "期限", weight: "bold", size: "sm" },
+        {
+          type: "text",
+          text: deadlineText || "（期限の指定なし）",
+          size: "sm",
+          wrap: true,
+        },
+      ],
+    },
   ];
 
   const footerContents = [];
 
-  // 添付資料ボタン（ある場合だけ）
-  if (hasAttachment && attachmentUrl) {
-    footerContents.push({
-      type: "button",
-      action: {
-        type: "uri",
-        label: "添付資料（PDF）を開く",
-        uri: attachmentUrl,
-      },
-      style: "primary",
-      color: "#4A90E2", // 青系
-      height: "md",
-      margin: "sm",
-    });
-  }
-
-  // 承認フォームへ遷移するボタン（ここからブラウザのコメント入力画面へ）
+  // 承認フォームへ遷移するボタン
   footerContents.push({
     type: "button",
     style: "primary",
     height: "md",
-    margin: hasAttachment && attachmentUrl ? "md" : "none",
+    margin: "none",
     action: {
       type: "uri",
-      label: "内容を確認して承認・否認する",
+      label: "内容を確認する",
       uri: approveUrl,
     },
+  });
+
+  // 案内テキスト
+  footerContents.push({
+    type: "text",
+    text:
+      "ボタンを押すとブラウザが開きます。開いた画面で内容を確認し、承認または否認を選んでください。",
+    wrap: true,
+    size: "xs",
+    color: "#888888",
+    margin: "sm",
   });
 
   const message = {
