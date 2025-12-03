@@ -24,9 +24,9 @@ export async function sendApprovalMessage(pageId) {
 
   const pageData = await pageRes.json();
 
-  // --- 2. タイトルを取得 ---
+  // --- 2. タイトルを取得（プロパティ名：名前） ---
   const title =
-    pageData.properties["タイトル"]?.title?.[0]?.plain_text || "承認依頼";
+    pageData.properties["名前"]?.title?.[0]?.plain_text || "承認依頼";
 
   // --- 2.5 議案番号の取得（議案DB 側で自動採番） ---
   let issueNo = "";
@@ -112,7 +112,7 @@ export async function sendApprovalMessage(pageId) {
   const approveUrl = `https://approval.garagetsuno.org/approve?id=${pageId}`;
   const denyUrl = `https://approval.garagetsuno.org/deny?id=${pageId}`;
 
-  // --- 6. Notion に URL を書き込む ---
+  // --- 6. Notion に URL を書き込む（プロパティ名：approveURL / denyURL） ---
   await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "PATCH",
     headers: {
@@ -122,8 +122,8 @@ export async function sendApprovalMessage(pageId) {
     },
     body: JSON.stringify({
       properties: {
-        承認URL: { url: approveUrl },
-        否認URL: { url: denyUrl },
+        approveURL: { url: approveUrl },
+        denyURL: { url: denyUrl },
       },
     }),
   });
