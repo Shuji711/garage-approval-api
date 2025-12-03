@@ -1,6 +1,6 @@
 // /utils/sendApprovalCore.js
 // 承認票DB のページIDを受け取り、関連する議案情報を取得して
-// 承認依頼メッセージを LINE に送信する（内容・添付・Notionリンク付き）
+// 承認依頼メッセージを LINE に送信する（内容・添付リンク・Notionリンク付き）
 
 const { ensureIssueSequence } = require("./issueNumberCore");
 
@@ -64,6 +64,7 @@ async function sendApprovalMessage(pageId) {
         const proposalData = await proposalRes.json();
         const pProps = proposalData.properties || {};
 
+        // 議案番号
         const issueProp =
           pProps["議案番号フォーミュラ"] ||
           pProps["議案番号"] ||
@@ -74,6 +75,7 @@ async function sendApprovalMessage(pageId) {
           issueProp?.rich_text?.[0]?.plain_text ??
           "";
 
+        // 内容（説明）を要約
         const descSource = pProps["内容（説明）"]?.rich_text;
         if (Array.isArray(descSource) && descSource.length > 0) {
           const fullText = descSource.map((r) => r.plain_text || "").join("");
@@ -81,13 +83,14 @@ async function sendApprovalMessage(pageId) {
             fullText.length > 120 ? fullText.slice(0, 120) + "…" : fullText;
         }
 
-        const filesProp = pProps["添付資料"];
-        if (filesProp && Array.isArray(filesProp.files) && filesProp.files.length > 0) {
+        // 🔹 添付リンク（Googleドライブ等） — NotionのURLプロパティだけを見る
+        const linkProp = pProps["添付リンク"];
+        if (linkProp && linkProp.type === "url" && linkProp.url) {
           hasAttachment = true;
-          const f0 = filesProp.files[0];
-          attachmentUrl = f0.external?.url || f0.file?.url || "";
+          attachmentUrl = linkProp.url;
         }
 
+        // Notion 議案ページURL（IDのハイフンを外して生成）
         const cleanId = proposalPageId.replace(/-/g, "");
         proposalUrl = `https://www.notion.so/${cleanId}`;
       }
@@ -148,7 +151,7 @@ async function sendApprovalMessage(pageId) {
     };
   }
 
-  // --- 4. Notion へ approveURL/denyURL + LINEユーザーID文字列 を書き戻す ---
+  // --- 4. Notion に approveURL / denyURL / LINEユーザーID文字列 を書き戻す ---
   const approveUrl = `https://approval.garagetsuno.org/approve?id=${pageId}`;
   const denyUrl = `https://approval.garagetsuno.org/deny?id=${pageId}`;
   const lineIdJoined = lineUserIds.join("\n");
@@ -221,7 +224,7 @@ async function sendApprovalMessage(pageId) {
   if (hasAttachment) {
     bodyContents.push({
       type: "text",
-      text: "添付資料：あり",
+      text: "添付資料：あり（外部リンク）",
       size: "xs",
       margin: "md",
     });
@@ -300,7 +303,7 @@ async function sendApprovalMessage(pageId) {
     },
   };
 
-  // --- 6. LINE に送信（ログ入り） ---
+  // --- 6. LINE に送信（ログ付き） ---
   for (const lineId of lineUserIds) {
     try {
       const res = await fetch("https://api.line.me/v2/bot/message/push", {
