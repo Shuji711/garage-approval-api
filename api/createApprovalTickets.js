@@ -2,10 +2,13 @@
 // 議案DBのページID（pageId）を受け取り、
 // 承認対象に応じて承認票DBに承認票を自動生成し、
 // 生成した承認票ごとに LINE 承認依頼を送信する。
-// ※現在はテスト段階として「安藤 修二」のみを送信対象とする。
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
+
+// 環境変数に DB ID があれば優先して使う（なければタイトル検索）
+const MEMBER_DB_ID_ENV = process.env.NOTION_MEMBER_DATABASE_ID;   // 会員DB
+const APPROVAL_DB_ID_ENV = process.env.NOTION_APPROVAL_DATABASE_ID; // 承認票DB
 
 const { sendApprovalMessage } = require("../utils/sendApprovalCore");
 
@@ -29,49 +32,62 @@ async function notionFetch(path, options = {}) {
   return res.json();
 }
 
-// タイトルから DB を検索（会員DB / 承認票DB 用）
-async function findDatabaseIdByTitle(title) {
+// DBタイトルからIDを検索（環境変数があればそちらを優先）
+async function getDatabaseId(logicalName, fallbackTitle, envId) {
+  if (envId) return envId;
+
   const data = await notionFetch("/search", {
     method: "POST",
     body: JSON.stringify({
-      query: title,
+      query: fallbackTitle,
       filter: { property: "object", value: "database" },
     }),
   });
 
   const hit = (data.results || []).find((db) => {
     const t = db.title?.[0]?.plain_text || "";
-    return t === title;
+    return t === fallbackTitle;
   });
 
   if (!hit) {
-    throw new Error(`Database "${title}" not found`);
+    throw new Error(`Database "${logicalName}" not found (title="${fallbackTitle}")`);
   }
 
   return hit.id;
 }
 
 // 承認対象に応じて会員リストを取得
+// ・理事会  : 会員DB.理事 = true かつ LINEユーザーID が空でない
+// ・正会員: 会員DB.正会員 = true かつ LINEユーザーID が空でない
+// ★開発中は「LINEユーザーID を安藤さんだけ埋めておく」ことで送信先を制御する。
 async function getTargetMembers(approvalTarget) {
-  // 会員DB をタイトルから取得
-  const memberDbId = await findDatabaseIdByTitle("会員DB");
+  const memberDbId = await getDatabaseId("会員DB", "会員DB", MEMBER_DB_ID_ENV);
 
-  let filter;
+  let roleFilter;
   if (approvalTarget === "理事会") {
-    // 会員DB.理事 = true
-    filter = {
+    roleFilter = {
       property: "理事",
       checkbox: { equals: true },
     };
   } else if (approvalTarget === "正会員") {
-    // 会員DB.正会員 = true
-    filter = {
+    roleFilter = {
       property: "正会員",
       checkbox: { equals: true },
     };
   } else {
     throw new Error(`未知の承認対象: ${approvalTarget}`);
   }
+
+  // LINEユーザーIDが入っている人だけを対象にする
+  const filter = {
+    and: [
+      roleFilter,
+      {
+        property: "LINEユーザーID",
+        rich_text: { is_not_empty: true },
+      },
+    ],
+  };
 
   const data = await notionFetch(`/databases/${memberDbId}/query`, {
     method: "POST",
@@ -89,14 +105,13 @@ async function getTargetMembers(approvalTarget) {
     };
   });
 
-  // ★テスト段階：安藤 修二 だけに絞る
-  const filtered = members.filter((m) => m.name === "安藤 修二");
-
-  if (filtered.length === 0) {
-    throw new Error("テスト対象（安藤 修二）が会員DBから見つかりません。");
+  if (members.length === 0) {
+    throw new Error(
+      "承認対象の会員が見つかりません（該当ロールかつ LINEユーザーID が空でない会員が 0 件）"
+    );
   }
 
-  return filtered;
+  return members;
 }
 
 // 承認票DB に 1件作成
@@ -106,7 +121,7 @@ async function createApprovalTicket(approvalDbId, proposalPageId, proposalTitle,
   const body = {
     parent: { database_id: approvalDbId },
     properties: {
-      // 承認票DB の Title プロパティ（名前 or タイトル）
+      // 承認票DB の Title プロパティ（「名前」で運用）
       名前: {
         title: [
           {
@@ -114,8 +129,12 @@ async function createApprovalTicket(approvalDbId, proposalPageId, proposalTitle,
           },
         ],
       },
-      // 会員リレーション
+      // 会員（旧仕様）とのリレーション：互換のために残す
       会員: {
+        relation: [{ id: member.id }],
+      },
+      // 新仕様：承認者リレーション（sendApprovalCore が参照する）
+      承認者: {
         relation: [{ id: member.id }],
       },
       // 議案リレーション
@@ -133,22 +152,29 @@ async function createApprovalTicket(approvalDbId, proposalPageId, proposalTitle,
   return page;
 }
 
-// 議案ページに承認票を紐付ける（承認票DB リレーション）
+// （オプション）議案ページに承認票を紐付けるリレーション
+// 議案DB 側に「承認票DB」プロパティを作っている前提。
+// なければこの処理は実害なくスキップしても良い。
 async function attachTicketsToProposal(proposalPageId, ticketIds) {
   if (!ticketIds.length) return;
 
   const relations = ticketIds.map((id) => ({ id }));
 
-  await notionFetch(`/pages/${proposalPageId}`, {
-    method: "PATCH",
-    body: JSON.stringify({
-      properties: {
-        承認票DB: {
-          relation: relations,
+  try {
+    await notionFetch(`/pages/${proposalPageId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        properties: {
+          承認票DB: {
+            relation: relations,
+          },
         },
-      },
-    }),
-  });
+      }),
+    });
+  } catch (e) {
+    // 関連プロパティが存在しない場合などは、ログだけ出して処理継続
+    console.error("attachTicketsToProposal error (非致命的):", e.message || e);
+  }
 }
 
 // メイン処理
@@ -169,13 +195,13 @@ async function handleCreateTickets(pageId) {
     throw new Error("議案の「承認対象」が選択されていません。");
   }
 
-  // 2. 対象会員を取得（理事 or 正会員）
+  // 2. 対象会員を取得（理事 or 正会員｜＋ LINEユーザーIDあり）
   const members = await getTargetMembers(approvalTarget);
 
   // 3. 承認票DB を特定
-  const approvalDbId = await findDatabaseIdByTitle("承認票DB");
+  const approvalDbId = await getDatabaseId("承認票DB", "承認票DB", APPROVAL_DB_ID_ENV);
 
-  // 4. 承認票を人数分作成
+  // 4. 承認票を人数分作成し、その場で LINE 承認依頼を送信
   const createdTicketIds = [];
   for (const member of members) {
     const ticketPage = await createApprovalTicket(
@@ -186,11 +212,11 @@ async function handleCreateTickets(pageId) {
     );
     createdTicketIds.push(ticketPage.id);
 
-    // 5. 生成した承認票ごとに LINE 承認依頼を送信
+    // 生成した承認票ごとに LINE 承認依頼を送信
     await sendApprovalMessage(ticketPage.id);
   }
 
-  // 6. 議案ページ側に承認票を紐付け
+  // 5. 議案ページ側に承認票を紐付け（あれば）
   await attachTicketsToProposal(pageId, createdTicketIds);
 
   return {
