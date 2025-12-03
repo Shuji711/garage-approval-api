@@ -1,2 +1,6 @@
 {
+  "rewrites": [
+    { "source": "/approve", "destination": "/api/approve" },
+    { "source": "/deny", "destination": "/api/deny" }
+  ]
 }
