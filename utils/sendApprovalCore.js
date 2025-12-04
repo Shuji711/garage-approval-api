@@ -1,393 +1,205 @@
 // /utils/sendApprovalCore.js
-// 承認票DB のページIDを受け取り、関連する議案情報を取得して
-// 承認依頼メッセージを LINE に送信する（概要のみ）
 
-const { ensureIssueSequence } = require("./issueNumberCore");
+// ===== 設定ここだけ確認 =====
 
-function formatJpDate(dateStr) {
-  if (!dateStr) return "";
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return "";
-  const w = ["日", "月", "火", "水", "木", "金", "土"];
-  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日（${
-    w[d.getDay()]
-  }）`;
-}
+// 承認フォーム（内容確認画面）のURLベース
+// ブラウザで開くURLが違う場合は、ここのみ修正してください。
+const APPROVAL_FORM_BASE_URL = "https://approval.garagetsuno.org/approval";
 
-async function sendApprovalMessage(pageId) {
-  const notionToken = process.env.NOTION_API_KEY;
-  const lineToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+// Notion のバージョン
+const NOTION_VERSION = "2022-06-28";
 
-  // --- 1. 承認票ページを取得 ---
-  const pageRes = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+// =============================
+
+const NOTION_API_KEY = process.env.NOTION_API_KEY;
+const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+
+/**
+ * Notion API 共通呼び出し
+ */
+async function notionRequest(path, method = "GET", body) {
+  const res = await fetch(`https://api.notion.com/v1${path}`, {
+    method,
     headers: {
-      Authorization: `Bearer ${notionToken}`,
-      "Notion-Version": "2022-06-28",
+      Authorization: `Bearer ${NOTION_API_KEY}`,
+      "Notion-Version": NOTION_VERSION,
       "Content-Type": "application/json",
     },
+    body: body ? JSON.stringify(body) : undefined,
   });
 
-  if (!pageRes.ok) {
-    const txt = await pageRes.text();
-    throw new Error(
-      `Failed to fetch approval page: ${pageRes.status} ${txt || pageRes.statusText}`
-    );
+  if (!res.ok) {
+    const text = await res.text();
+    console.error("Notion API error:", res.status, text);
+    throw new Error(`Notion API error: ${res.status}`);
   }
 
-  const pageData = await pageRes.json();
-  const props = pageData.properties || {};
+  return res.json();
+}
 
-  // 承認票タイトル（ここでは「議案名」として扱う）
-  const title =
-    props["名前"]?.title?.[0]?.plain_text ||
-    props["タイトル"]?.title?.[0]?.plain_text ||
-    "承認依頼";
+/**
+ * 承認票ページから、会員DB経由で LINEユーザーID の配列を取得する
+ *
+ * 前提：
+ * - 承認票DBに 会員DB へのリレーションプロパティ「会員」がある
+ * - 会員DBに、文字列プロパティ「LINEユーザーID」がある
+ */
+async function getLineUserIdsFromApprovalPage(approvalPageId) {
+  const page = await notionRequest(`/pages/${approvalPageId}`, "GET");
+  const props = page.properties;
 
-  // --- 2. 議案ページ関連情報の取得 ---
-  let issueNo = "";
-  let proposalSummary = "";
-  let proposerNames = "";
-  let deadlineText = "";
-  let proposalUrl = "";
-
-  try {
-    const proposalRel = props["議案"]?.relation || [];
-    const proposalPageId = proposalRel[0]?.id;
-
-    if (proposalPageId) {
-      // (1) 議案番号の自動採番（未採番なら振る）
-      await ensureIssueSequence(proposalPageId);
-
-      // (2) 採番後の議案ページを再取得
-      const proposalRes = await fetch(
-        `https://api.notion.com/v1/pages/${proposalPageId}`,
-        {
-          headers: {
-            Authorization: `Bearer ${notionToken}`,
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      if (proposalRes.ok) {
-        const proposalData = await proposalRes.json();
-        const pProps = proposalData.properties || {};
-
-        // 議案番号
-        const issueProp =
-          pProps["議案番号フォーミュラ"] ||
-          pProps["議案番号"] ||
-          pProps["議案番号（自動）"];
-
-        issueNo =
-          issueProp?.formula?.string ??
-          issueProp?.rich_text?.[0]?.plain_text ??
-          "";
-
-        // 内容（説明）を要約
-        const descSource = pProps["内容（説明）"]?.rich_text;
-        if (Array.isArray(descSource) && descSource.length > 0) {
-          const fullText = descSource.map((r) => r.plain_text || "").join("");
-          proposalSummary =
-            fullText.length > 120 ? fullText.slice(0, 120) + "…" : fullText;
-        }
-
-        // 発議者（会員DBへのリレーション想定）
-        const proposerRel = pProps["発議者"]?.relation || [];
-        const proposerList = [];
-        for (const rel of proposerRel) {
-          const memberId = rel.id;
-          try {
-            const memberRes = await fetch(
-              `https://api.notion.com/v1/pages/${memberId}`,
-              {
-                headers: {
-                  Authorization: `Bearer ${notionToken}`,
-                  "Notion-Version": "2022-06-28",
-                  "Content-Type": "application/json",
-                },
-              }
-            );
-            if (!memberRes.ok) continue;
-            const memberData = await memberRes.json();
-            const mProps = memberData.properties || {};
-            const mNameProp =
-              mProps["氏名"] || mProps["名前"] || mProps["タイトル"];
-            let memberName = "";
-            if (
-              mNameProp &&
-              mNameProp.type === "title" &&
-              Array.isArray(mNameProp.title) &&
-              mNameProp.title.length > 0
-            ) {
-              memberName = mNameProp.title[0].plain_text || "";
-            }
-            if (memberName) proposerList.push(memberName);
-          } catch (e) {
-            console.error("Fetch proposer for LINE failed:", e);
-          }
-        }
-        if (proposerList.length > 0) {
-          proposerNames = proposerList.join("、");
-        }
-
-        // 承認期限（日付プロパティ）
-        const deadlineProp =
-          pProps["承認期限"]?.date || pProps["期限"]?.date || null;
-        const deadlineStart = deadlineProp?.start;
-        if (deadlineStart) {
-          deadlineText = formatJpDate(deadlineStart);
-        }
-
-        // Notion 議案ページURL（IDのハイフンを外して生成）
-        const cleanId = proposalPageId.replace(/-/g, "");
-        proposalUrl = `https://www.notion.so/${cleanId}`;
-      }
-    }
-  } catch (e) {
-    console.error("Issue / proposal info fetch failed:", e);
+  const memberRelationProp = props["会員"];
+  if (!memberRelationProp || memberRelationProp.type !== "relation") {
+    console.warn("承認票ページに「会員」リレーションがありません。");
+    return [];
   }
 
-  // --- 3. 承認票から LINE 送信先の取得 ---
-  const memberRel = props["会員"]?.relation || [];
-  const lineRollup = props["LINEユーザーID"];
+  const relatedMembers = memberRelationProp.relation || [];
+  if (!relatedMembers.length) {
+    console.warn("承認票ページの「会員」リレーションにレコードが設定されていません。");
+    return [];
+  }
+
   const lineUserIds = [];
 
-  // ① ロールアップ
-  if (lineRollup && lineRollup.type === "rollup") {
-    const roll = lineRollup.rollup;
-    if (roll && roll.type === "array" && Array.isArray(roll.array)) {
-      for (const item of roll.array) {
-        if (item.type === "rich_text" && item.rich_text?.length) {
-          const idText = item.rich_text[0].plain_text;
-          if (idText) lineUserIds.push(idText);
-        }
-      }
+  for (const rel of relatedMembers) {
+    const memberId = rel.id;
+    const memberPage = await notionRequest(`/pages/${memberId}`, "GET");
+    const mProps = memberPage.properties;
+
+    const lineIdProp = mProps["LINEユーザーID"];
+    if (!lineIdProp) continue;
+
+    let value = "";
+
+    // 会員DB側の「LINEユーザーID」がどのタイプでもだいたい拾えるようにしておく
+    if (lineIdProp.type === "rich_text" && lineIdProp.rich_text.length > 0) {
+      value = lineIdProp.rich_text.map((t) => t.plain_text).join("");
+    } else if (lineIdProp.type === "title" && lineIdProp.title.length > 0) {
+      value = lineIdProp.title.map((t) => t.plain_text).join("");
+    } else if (lineIdProp.type === "formula" && lineIdProp.formula.type === "string") {
+      value = lineIdProp.formula.string || "";
+    }
+
+    if (value && value.trim()) {
+      lineUserIds.push(value.trim());
     }
   }
 
-  // ② 会員DB側補完
-  if (lineUserIds.length === 0 && memberRel.length > 0) {
-    for (const rel of memberRel) {
-      const memberId = rel.id;
-      try {
-        const memberRes = await fetch(
-          `https://api.notion.com/v1/pages/${memberId}`,
-          {
-            headers: {
-              Authorization: `Bearer ${notionToken}`,
-              "Notion-Version": "2022-06-28",
-              "Content-Type": "application/json",
-            },
-          }
-        );
-        if (!memberRes.ok) continue;
-        const memberData = await memberRes.json();
-        const mProps = memberData.properties || {};
-        const lineText =
-          mProps["LINEユーザーID"]?.rich_text?.[0]?.plain_text || "";
-        if (lineText) lineUserIds.push(lineText);
-      } catch (e) {
-        console.error("Fetch member for LINE ID failed:", e);
-      }
-    }
-  }
+  // 重複があっても困るので uniq にする
+  return Array.from(new Set(lineUserIds));
+}
 
-  if (lineUserIds.length === 0) {
-    return {
-      ok: false,
-      error: "LINEユーザーID を取得できませんでした。",
-    };
-  }
-
-  // --- 4. Notion に approveURL / denyURL / LINEユーザーID文字列 を書き戻す ---
-  const approveUrl = `https://approval.garagetsuno.org/approve?id=${pageId}`;
-  const denyUrl = `https://approval.garagetsuno.org/deny?id=${pageId}`;
-  const lineIdJoined = lineUserIds.join("\n");
-
-  try {
-    await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-      method: "PATCH",
-      headers: {
-        Authorization: `Bearer ${notionToken}`,
-        "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        properties: {
-          approveURL: { url: approveUrl },
-          denyURL: { url: denyUrl },
-          LINEユーザーID文字列: {
-            rich_text: [
-              {
-                type: "text",
-                text: { content: lineIdJoined },
-              },
-            ],
-          },
-        },
-      }),
-    });
-  } catch (e) {
-    console.error("Failed to write approve/deny URL or LINE IDs to Notion:", e);
-  }
-
-  // --- 5. LINE Flex メッセージ構築 ---
-  const agendaLine = issueNo ? `${issueNo}　${title}` : title;
-
-  const bodyContents = [
-    {
-      type: "text",
-      text: "承認依頼",
-      weight: "bold",
-      size: "lg",
-      align: "center",
+/**
+ * LINE に Flex メッセージを送信
+ */
+async function pushLineMessage(to, flexMessage) {
+  const res = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
+      "Content-Type": "application/json",
     },
-    {
-      type: "box",
-      layout: "vertical",
-      margin: "md",
-      spacing: "xs",
-      contents: [
-        { type: "text", text: "議案", weight: "bold", size: "sm" },
-        { type: "text", text: agendaLine, size: "sm", wrap: true },
-      ],
-    },
-    {
-      type: "box",
-      layout: "vertical",
-      margin: "md",
-      spacing: "xs",
-      contents: [
-        { type: "text", text: "内容", weight: "bold", size: "sm" },
-        {
-          type: "text",
-          text: proposalSummary || "（内容未入力）",
-          size: "sm",
-          wrap: true,
-        },
-      ],
-    },
-    {
-      type: "box",
-      layout: "vertical",
-      margin: "md",
-      spacing: "xs",
-      contents: [
-        { type: "text", text: "発議者", weight: "bold", size: "sm" },
-        {
-          type: "text",
-          text: proposerNames || "（発議者情報なし）",
-          size: "sm",
-          wrap: true,
-        },
-      ],
-    },
-    {
-      type: "box",
-      layout: "vertical",
-      margin: "md",
-      spacing: "xs",
-      contents: [
-        { type: "text", text: "期限", weight: "bold", size: "sm" },
-        {
-          type: "text",
-          text: deadlineText || "（期限の指定なし）",
-          size: "sm",
-          wrap: true,
-        },
-      ],
-    },
-  ];
-
-  const footerContents = [];
-
-  // 承認フォームへ遷移するボタン
-  footerContents.push({
-    type: "button",
-    style: "primary",
-    height: "md",
-    margin: "none",
-    action: {
-      type: "uri",
-      label: "内容を確認する",
-      uri: approveUrl,
-    },
+    body: JSON.stringify({
+      to,
+      messages: [flexMessage],
+    }),
   });
 
-  // 案内テキスト
-  footerContents.push({
-    type: "text",
-    text:
-      "ボタンを押すとブラウザが開きます。開いた画面で内容を確認し、承認または否認を選んでください。",
-    wrap: true,
-    size: "xs",
-    color: "#888888",
-    margin: "sm",
-  });
+  if (!res.ok) {
+    const text = await res.text();
+    console.error("LINE push error:", res.status, text);
+    throw new Error(`LINE push error: ${res.status}`);
+  }
+}
 
-  const message = {
+/**
+ * 外部から呼び出されるメイン関数
+ *
+ * 引数：
+ * - approvalPageId: 承認票DB のページID
+ */
+export async function sendApprovalMessage(approvalPageId) {
+  if (!NOTION_API_KEY) {
+    throw new Error("NOTION_API_KEY is not set.");
+  }
+  if (!LINE_CHANNEL_ACCESS_TOKEN) {
+    throw new Error("LINE_CHANNEL_ACCESS_TOKEN is not set.");
+  }
+
+  // 1. 宛先となる LINEユーザーID を取得（会員DB → LINEユーザーID）
+  const lineUserIds = await getLineUserIdsFromApprovalPage(approvalPageId);
+
+  if (!lineUserIds.length) {
+    console.warn("宛先の LINEユーザーID が見つかりませんでした。");
+    throw new Error("No LINE user IDs found for this approval ticket.");
+  }
+
+  // 2. 承認フォームへのURLを組み立て
+  const approvalUrl = `${APPROVAL_FORM_BASE_URL}?id=${encodeURIComponent(
+    approvalPageId
+  )}`;
+
+  // 3. Flex メッセージ本体
+  //    内容は最小限。「承認依頼が届いています」＋「内容を確認する」ボタンのみ。
+  const flexMessage = {
     type: "flex",
-    altText: "承認依頼があります",
+    altText: "【承認依頼】NPO法人ガレージ都農",
     contents: {
       type: "bubble",
       body: {
         type: "box",
         layout: "vertical",
-        contents: bodyContents,
+        spacing: "md",
+        contents: [
+          {
+            type: "text",
+            text: "承認のお願い",
+            weight: "bold",
+            size: "md",
+          },
+          {
+            type: "text",
+            text: "NPO法人ガレージ都農から承認のお願いです。",
+            wrap: true,
+            size: "sm",
+          },
+          {
+            type: "text",
+            text: "リンク先の画面で内容を確認し、「承認」または「否認」を選んで送信してください。",
+            wrap: true,
+            size: "xs",
+            margin: "md",
+          },
+        ],
       },
       footer: {
         type: "box",
         layout: "vertical",
-        contents: footerContents,
-        spacing: "md",
+        spacing: "sm",
+        contents: [
+          {
+            type: "button",
+            style: "primary",
+            height: "md",
+            action: {
+              type: "uri",
+              label: "内容を確認する",
+              uri: approvalUrl,
+            },
+          },
+        ],
       },
     },
   };
 
-  // --- 6. LINE に送信（ログ付き） ---
-  for (const lineId of lineUserIds) {
-    try {
-      const res = await fetch("https://api.line.me/v2/bot/message/push", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${lineToken}`,
-        },
-        body: JSON.stringify({
-          to: lineId,
-          messages: [message],
-        }),
-      });
-
-      const text = await res.text();
-
-      console.log("LINE push response:", {
-        to: lineId,
-        status: res.status,
-        body: text,
-      });
-
-      if (!res.ok) {
-        throw new Error(
-          `LINE push failed: ${res.status} ${text || res.statusText}`
-        );
-      }
-    } catch (e) {
-      console.error("LINE push exception:", e);
-      throw e;
-    }
+  // 4. 宛先ごとに送信（春木・志帆 ほか該当会員全員）
+  for (const to of lineUserIds) {
+    await pushLineMessage(to, flexMessage);
   }
 
   return {
     ok: true,
     sentTo: lineUserIds,
-    issueNo,
-    proposalUrl,
   };
 }
-
-module.exports = {
-  sendApprovalMessage,
-};
