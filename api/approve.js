@@ -199,7 +199,6 @@ function notionTextToString(prop) {
 function collectAttachmentSlots(props) {
   const attachments = [];
 
-  // 共通処理
   const addSlot = (nameKey, urlKey) => {
     const urlProp = props[urlKey];
     if (!urlProp || urlProp.type !== "url" || !urlProp.url) return;
@@ -208,20 +207,15 @@ function collectAttachmentSlots(props) {
     const nameProp = props[nameKey];
     let label = notionTextToString(nameProp);
     if (!label) {
-      // 名前が空の場合は汎用ラベル
       label = "添付資料を開く";
     }
 
-    attachments.push({
-      label,
-      url,
-    });
+    attachments.push({ label, url });
   };
 
-  // 既存の無印スロット
+  // 無印
   addSlot("添付資料名", "添付URL");
-
-  // 添付資料名1〜5 / 添付URL1〜5
+  // 1〜5
   for (let i = 1; i <= 5; i++) {
     addSlot(`添付資料名${i}`, `添付URL${i}`);
   }
@@ -273,14 +267,14 @@ async function getProposalInfoHtmlFromApprovalPage(pageId) {
     const proposalPage = await propRes.json();
     const props = proposalPage.properties;
 
-    // 議案名（タイトル）
+    // 議案名
     let title = "";
     const titleProp = props["議案"];
     if (titleProp && titleProp.type === "title" && titleProp.title.length) {
       title = titleProp.title.map((t) => t.plain_text).join("");
     }
 
-    // 議案番号（フォーミュラ優先 → 議案番号）
+    // 議案番号（フォーミュラ優先）
     let number = "";
     const numFormulaProp = props["議案番号フォーミュラ"];
     if (
@@ -301,7 +295,7 @@ async function getProposalInfoHtmlFromApprovalPage(pageId) {
       }
     }
 
-    // 作成者（提出者）
+    // 作成者
     let author = "";
     const submitterProp = props["提出者"];
     if (submitterProp) {
@@ -330,10 +324,10 @@ async function getProposalInfoHtmlFromApprovalPage(pageId) {
     const deadline = formatDateFromNotion(props["締切日"]);
     const effectiveUntil = formatDateFromNotion(props["施行期限"]);
 
-    // 添付資料スロット（外部URL系）
+    // 添付（外部URL系スロット）
     let attachments = collectAttachmentSlots(props);
 
-    // 添付スロットが一つも無い場合のみ、Driveリンクを使う
+    // 何も無いときだけ Drive リンクを見る
     if (attachments.length === 0) {
       const linkProp = props["添付リンク"];
       if (linkProp && linkProp.type === "url" && linkProp.url) {
@@ -471,45 +465,47 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
         sans-serif;
       padding: 16px;
-      line-height: 1.6;
+      line-height: 1.7;
       background: #f5f5f7;
+      font-size: 15px;
     }
     .container {
-      max-width: 520px;
+      max-width: 540px;
       margin: 0 auto;
       background: #ffffff;
-      border-radius: 12px;
-      padding: 16px 20px 20px;
+      border-radius: 14px;
+      padding: 18px 22px 22px;
       box-shadow: 0 2px 8px rgba(0,0,0,0.08);
     }
     h1 {
-      font-size: 18px;
+      font-size: 19px;
       margin: 0 0 8px;
     }
     .subtitle {
-      font-size: 12px;
-      color: #666;
-      margin-bottom: 12px;
+      font-size: 13px;
+      color: #555;
+      margin-bottom: 14px;
     }
     .proposal-box {
-      font-size: 13px;
+      font-size: 14px;
       background: #f7f9fc;
-      border-radius: 8px;
-      padding: 8px 10px 10px;
-      margin-bottom: 14px;
+      border-radius: 10px;
+      padding: 10px 12px 12px;
+      margin-bottom: 16px;
       border: 1px solid #e0e6f2;
     }
     .proposal-header {
       font-weight: 600;
-      font-size: 13px;
+      font-size: 14px;
       margin-bottom: 6px;
     }
     .proposal-row {
       display: flex;
-      margin-bottom: 2px;
+      margin-bottom: 4px;
+      font-size: 14px;
     }
     .proposal-row .label {
-      width: 80px;
+      width: 88px;
       color: #555;
     }
     .proposal-row .value {
@@ -521,40 +517,57 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
     }
     .attachments-list {
       margin: 0;
-      padding-left: 1.1em;
+      padding-left: 0;
+      list-style: none;
     }
     .attachments-list li {
-      margin: 0;
-      padding: 0;
-      list-style: disc;
-      font-size: 13px;
+      margin: 4px 0;
     }
     .attachments-list a {
-      text-decoration: underline;
+      display: inline-block;
+      min-width: 220px;
+      padding: 7px 12px;
+      border-radius: 999px;
+      background: #eef3ff;
+      border: 1px solid #c5d3f7;
+      font-size: 14px;
+      text-decoration: none;
+      color: #2255aa;
+      text-align: left;
+      box-sizing: border-box;
+    }
+    .attachments-list a:hover {
+      background: #dde7ff;
+      border-color: #93a9f0;
     }
     .field {
-      margin-bottom: 12px;
+      margin-bottom: 14px;
     }
     .field label {
       display: block;
-      font-size: 14px;
+      font-size: 15px;
       font-weight: 600;
-      margin-bottom: 4px;
+      margin-bottom: 5px;
     }
     .radio-group {
       display: flex;
-      gap: 16px;
-      font-size: 14px;
+      gap: 20px;
+      font-size: 15px;
+      align-items: center;
+    }
+    .radio-group input[type="radio"] {
+      transform: scale(1.1);
+      margin-right: 4px;
     }
     .radio-group label {
       font-weight: normal;
     }
     textarea {
       width: 100%;
-      min-height: 90px;
+      min-height: 110px;
       font-size: 14px;
-      padding: 8px;
-      border-radius: 6px;
+      padding: 9px;
+      border-radius: 7px;
       border: 1px solid #ccc;
       resize: vertical;
       box-sizing: border-box;
@@ -567,12 +580,12 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
     .help {
       font-size: 12px;
       color: #777;
-      margin-top: 4px;
+      margin-top: 5px;
     }
     .error-global {
-      margin-bottom: 8px;
-      padding: 8px;
-      border-radius: 6px;
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      border-radius: 7px;
       background: #ffecec;
       color: #c00;
       font-size: 13px;
@@ -583,16 +596,16 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
       margin-top: 4px;
     }
     .button-row {
-      margin-top: 16px;
+      margin-top: 18px;
       display: flex;
       justify-content: flex-end;
     }
     button[type="submit"] {
-      min-width: 120px;
-      padding: 8px 16px;
+      min-width: 130px;
+      padding: 9px 18px;
       border-radius: 999px;
       border: none;
-      font-size: 14px;
+      font-size: 15px;
       font-weight: 600;
       cursor: pointer;
       background: #4a90e2;
@@ -874,7 +887,7 @@ module.exports = async (req, res) => {
         sans-serif;
       padding: 16px;
       background: #f5f5f7;
-      line-height: 1.6;
+      line-height: 1.7;
     }
     .container {
       max-width: 480px;
@@ -886,7 +899,7 @@ module.exports = async (req, res) => {
       text-align: center;
     }
     h1 {
-      font-size: 18px;
+      font-size: 19px;
       margin-bottom: 8px;
     }
     p {
