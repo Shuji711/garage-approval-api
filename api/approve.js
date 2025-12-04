@@ -1,8 +1,14 @@
 // /api/approve.js
-// 承認フォーム表示 + 承認処理（コメント対応版）
+// 承認フォーム表示 + 承認処理（コメント＆議案情報＆Driveファイル名対応版）
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
+
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN;
+
+// --------------- 共通ユーティリティ ---------------
 
 async function parseBody(req) {
   return new Promise((resolve, reject) => {
@@ -17,7 +23,367 @@ async function parseBody(req) {
   });
 }
 
-function renderForm({ errorMessage, initialDecision }) {
+// HTMLエスケープ
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// YYYY-MM-DD → YYYY/MM/DD 表示用
+function formatDateFromNotion(dateProp) {
+  if (!dateProp || dateProp.type !== "date" || !dateProp.date || !dateProp.date.start) {
+    return "";
+  }
+  const s = dateProp.date.start; // "2025-12-04T..." or "2025-12-04"
+  const d = s.slice(0, 10);
+  return d.replace(/-/g, "/");
+}
+
+// --------------- Google Drive 関連 ---------------
+
+// Drive共有URLから fileId を抜き出す
+function extractDriveFileId(url) {
+  if (!url) return "";
+
+  try {
+    // /file/d/{id}/view 形式
+    let m = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+    if (m && m[1]) return m[1];
+
+    // ?id=xxxxx 形式
+    const u = new URL(url);
+    const idParam = u.searchParams.get("id");
+    if (idParam) return idParam;
+
+    // /uc?id=xxxxx 形式
+    m = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+    if (m && m[1]) return m[1];
+  } catch (e) {
+    console.error("extractDriveFileId error:", e);
+  }
+
+  return "";
+}
+
+// Refresh Token から Access Token を取得
+async function getDriveAccessToken() {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
+    console.error("Google OAuth env vars missing");
+    return null;
+  }
+
+  const params = new URLSearchParams();
+  params.set("client_id", GOOGLE_CLIENT_ID);
+  params.set("client_secret", GOOGLE_CLIENT_SECRET);
+  params.set("refresh_token", GOOGLE_REFRESH_TOKEN);
+  params.set("grant_type", "refresh_token");
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: params.toString(),
+  });
+
+  if (!res.ok) {
+    console.error("getDriveAccessToken error:", await res.text());
+    return null;
+  }
+
+  const json = await res.json();
+  return json.access_token || null;
+}
+
+// Drive API からファイル名などを取得
+async function getDriveFileInfo(url) {
+  const fileId = extractDriveFileId(url);
+  if (!fileId) return null;
+
+  const accessToken = await getDriveAccessToken();
+  if (!accessToken) return null;
+
+  const apiUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,webViewLink,iconLink,mimeType`;
+
+  const res = await fetch(apiUrl, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!res.ok) {
+    console.error("getDriveFileInfo error:", await res.text());
+    return null;
+  }
+
+  const data = await res.json();
+  return {
+    name: data.name || "",
+    webViewLink: data.webViewLink || url,
+    iconLink: data.iconLink || "",
+    mimeType: data.mimeType || "",
+  };
+}
+
+// --------------- Notion 関連 ---------------
+
+// 承認票ページ → 会員ページ → 氏名取得
+async function getMemberNameFromApprovalPage(pageId) {
+  const pageRes = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${NOTION_API_KEY}`,
+      "Notion-Version": NOTION_VERSION,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!pageRes.ok) {
+    console.error("getMemberName page error:", await pageRes.text());
+    return "";
+  }
+
+  const page = await pageRes.json();
+  const memberProp = page.properties["会員"];
+  if (
+    !memberProp ||
+    memberProp.type !== "relation" ||
+    !memberProp.relation.length
+  ) {
+    return "";
+  }
+
+  const memberId = memberProp.relation[0].id;
+  const memberRes = await fetch(
+    `https://api.notion.com/v1/pages/${memberId}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${NOTION_API_KEY}`,
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  if (!memberRes.ok) {
+    console.error("getMemberName member error:", await memberRes.text());
+    return "";
+  }
+
+  const memberPage = await memberRes.json();
+  const nameProp = memberPage.properties["氏名"];
+  if (!nameProp || nameProp.type !== "title" || !nameProp.title.length) {
+    return "";
+  }
+  return nameProp.title.map((t) => t.plain_text).join("");
+}
+
+// 承認票ページ → 議案ページ → 議案情報をHTMLで返す
+async function getProposalInfoHtmlFromApprovalPage(pageId) {
+  try {
+    const pageRes = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${NOTION_API_KEY}`,
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!pageRes.ok) {
+      console.error("getProposalInfo approval error:", await pageRes.text());
+      return "";
+    }
+
+    const approvalPage = await pageRes.json();
+    const rel = approvalPage.properties["議案"];
+    if (!rel || rel.type !== "relation" || !rel.relation.length) {
+      return "";
+    }
+
+    const proposalId = rel.relation[0].id;
+    const propRes = await fetch(
+      `https://api.notion.com/v1/pages/${proposalId}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${NOTION_API_KEY}`,
+          "Notion-Version": NOTION_VERSION,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    if (!propRes.ok) {
+      console.error("getProposalInfo proposal error:", await propRes.text());
+      return "";
+    }
+
+    const proposalPage = await propRes.json();
+    const props = proposalPage.properties;
+
+    // 議案名（タイトル）
+    let title = "";
+    const titleProp = props["議案"];
+    if (titleProp && titleProp.type === "title" && titleProp.title.length) {
+      title = titleProp.title.map((t) => t.plain_text).join("");
+    }
+
+    // 議案番号（フォーミュラ優先 → 議案番号）
+    let number = "";
+    const numFormulaProp = props["議案番号フォーミュラ"];
+    if (
+      numFormulaProp &&
+      numFormulaProp.type === "formula" &&
+      numFormulaProp.formula.type === "string"
+    ) {
+      number = numFormulaProp.formula.string || "";
+    }
+    if (!number) {
+      const numProp = props["議案番号"];
+      if (numProp) {
+        if (numProp.type === "rich_text" && numProp.rich_text.length) {
+          number = numProp.rich_text.map((t) => t.plain_text).join("");
+        } else if (numProp.type === "number" && numProp.number != null) {
+          number = String(numProp.number);
+        }
+      }
+    }
+
+    // 提出者
+    let author = "";
+    const submitterProp = props["提出者"];
+    if (submitterProp) {
+      if (submitterProp.type === "people" && submitterProp.people.length) {
+        author = submitterProp.people
+          .map((p) => p.name || "")
+          .filter(Boolean)
+          .join("・");
+      } else if (
+        submitterProp.type === "rich_text" &&
+        submitterProp.rich_text.length
+      ) {
+        author = submitterProp.rich_text.map((t) => t.plain_text).join("");
+      } else if (
+        submitterProp.type === "multi_select" &&
+        submitterProp.multi_select.length
+      ) {
+        author = submitterProp.multi_select.map((t) => t.name).join("・");
+      }
+    }
+
+    // 提出日
+    const submittedAt = formatDateFromNotion(props["提出日"]);
+
+    // 締切日 / 施行期限
+    const deadline = formatDateFromNotion(props["締切日"]);
+    const effectiveUntil = formatDateFromNotion(props["施行期限"]);
+
+    // 添付資料（添付リンク）
+    let attachmentHtml = "";
+    const linkProp = props["添付リンク"];
+    if (linkProp && linkProp.type === "url" && linkProp.url) {
+      const url = linkProp.url;
+      let driveInfo = null;
+      try {
+        driveInfo = await getDriveFileInfo(url);
+      } catch (e) {
+        console.error("Drive info fetch error:", e);
+      }
+
+      if (driveInfo && driveInfo.name) {
+        const link = driveInfo.webViewLink || url;
+        const name = driveInfo.name;
+        attachmentHtml = `<a href="${escapeHtml(
+          link
+        )}" target="_blank" rel="noopener noreferrer">${escapeHtml(
+          name
+        )} を開く</a>`;
+      } else {
+        // Drive取得に失敗した場合は従来どおり
+        attachmentHtml = `<a href="${escapeHtml(
+          url
+        )}" target="_blank" rel="noopener noreferrer">添付資料を開く</a>`;
+      }
+    }
+
+    if (
+      !title &&
+      !number &&
+      !author &&
+      !submittedAt &&
+      !deadline &&
+      !effectiveUntil &&
+      !attachmentHtml
+    ) {
+      return "";
+    }
+
+    return `
+      <div class="proposal-box">
+        ${
+          title
+            ? `<div class="proposal-row"><span class="label">議案名</span><span class="value">${escapeHtml(
+                title
+              )}</span></div>`
+            : ""
+        }
+        ${
+          number
+            ? `<div class="proposal-row"><span class="label">議案番号</span><span class="value">${escapeHtml(
+                number
+              )}</span></div>`
+            : ""
+        }
+        ${
+          author
+            ? `<div class="proposal-row"><span class="label">作成者</span><span class="value">${escapeHtml(
+                author
+              )}</span></div>`
+            : ""
+        }
+        ${
+          submittedAt
+            ? `<div class="proposal-row"><span class="label">提出日</span><span class="value">${escapeHtml(
+                submittedAt
+              )}</span></div>`
+            : ""
+        }
+        ${
+          deadline
+            ? `<div class="proposal-row"><span class="label">締切日</span><span class="value">${escapeHtml(
+                deadline
+              )}</span></div>`
+            : ""
+        }
+        ${
+          effectiveUntil
+            ? `<div class="proposal-row"><span class="label">施行期限</span><span class="value">${escapeHtml(
+                effectiveUntil
+              )}</span></div>`
+            : ""
+        }
+        ${
+          attachmentHtml
+            ? `<div class="proposal-row"><span class="label">添付書類</span><span class="value">${attachmentHtml}</span></div>`
+            : ""
+        }
+      </div>
+    `;
+  } catch (e) {
+    console.error("getProposalInfo exception:", e);
+    return "";
+  }
+}
+
+// --------------- HTML レンダリング ---------------
+
+function renderForm({ errorMessage, initialDecision, proposalHtml }) {
   const errorBlock = errorMessage
     ? `<div class="error-global">
          ${errorMessage}
@@ -28,6 +394,8 @@ function renderForm({ errorMessage, initialDecision }) {
     initialDecision === "承認" ? 'checked="checked"' : "";
   const checkedDeny =
     initialDecision === "否認" ? 'checked="checked"' : "";
+
+  const proposalBlock = proposalHtml || "";
 
   return `<!doctype html>
 <html lang="ja">
@@ -44,7 +412,7 @@ function renderForm({ errorMessage, initialDecision }) {
       background: #f5f5f7;
     }
     .container {
-      max-width: 480px;
+      max-width: 520px;
       margin: 0 auto;
       background: #ffffff;
       border-radius: 12px;
@@ -59,6 +427,26 @@ function renderForm({ errorMessage, initialDecision }) {
       font-size: 12px;
       color: #666;
       margin-bottom: 12px;
+    }
+    .proposal-box {
+      font-size: 13px;
+      background: #f7f9fc;
+      border-radius: 8px;
+      padding: 8px 10px;
+      margin-bottom: 12px;
+      border: 1px solid #e0e6f2;
+    }
+    .proposal-row {
+      display: flex;
+      margin-bottom: 2px;
+    }
+    .proposal-row .label {
+      width: 80px;
+      color: #555;
+    }
+    .proposal-row .value {
+      flex: 1;
+      color: #222;
     }
     .field {
       margin-bottom: 12px;
@@ -146,6 +534,7 @@ function renderForm({ errorMessage, initialDecision }) {
 <body>
   <div class="container">
     ${errorBlock}
+    ${proposalBlock}
     <h1>承認フォーム</h1>
     <div class="subtitle">
       議案の内容を確認し、承認または否認を選択してください。
@@ -274,55 +663,7 @@ function renderForm({ errorMessage, initialDecision }) {
 </html>`;
 }
 
-async function getMemberNameFromApprovalPage(pageId) {
-  const pageRes = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${NOTION_API_KEY}`,
-      "Notion-Version": NOTION_VERSION,
-      "Content-Type": "application/json",
-    },
-  });
-
-  if (!pageRes.ok) {
-    return "";
-  }
-
-  const page = await pageRes.json();
-  const memberProp = page.properties["会員"];
-  if (
-    !memberProp ||
-    memberProp.type !== "relation" ||
-    !memberProp.relation.length
-  ) {
-    return "";
-  }
-
-  const memberId = memberProp.relation[0].id;
-  const memberRes = await fetch(
-    `https://api.notion.com/v1/pages/${memberId}`,
-    {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${NOTION_API_KEY}`,
-        "Notion-Version": NOTION_VERSION,
-        "Content-Type": "application/json",
-      },
-    }
-  );
-
-  if (!memberRes.ok) {
-    return "";
-  }
-
-  const memberPage = await memberRes.json();
-  const nameProp = memberPage.properties["氏名"];
-  if (!nameProp || nameProp.type !== "title" || !nameProp.title.length) {
-    return "";
-  }
-  return nameProp.title[0].plain_text || "";
-}
-
+// Notion更新（承認結果 + 承認日時 + コメント）
 async function updateApproval(pageId, resultName, commentRaw) {
   const now = new Date().toISOString();
 
@@ -338,17 +679,14 @@ async function updateApproval(pageId, resultName, commentRaw) {
   }
 
   const properties = {
-    // セレクトプロパティ「承認結果」に "承認" / "否認" を入れる
     "承認結果": {
       select: { name: resultName },
     },
-    // 日付プロパティ「承認日時」に実行時刻を入れる
     "承認日時": {
       date: { start: now },
     },
   };
 
-  // コメントがある場合のみ上書き（承認＋空コメントでは既存を保持）
   if (formattedComment) {
     properties["コメント"] = {
       rich_text: [
@@ -360,8 +698,6 @@ async function updateApproval(pageId, resultName, commentRaw) {
     };
   }
 
-  const body = { properties };
-
   const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "PATCH",
     headers: {
@@ -369,7 +705,7 @@ async function updateApproval(pageId, resultName, commentRaw) {
       "Notion-Version": NOTION_VERSION,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ properties }),
   });
 
   if (!res.ok) {
@@ -378,6 +714,8 @@ async function updateApproval(pageId, resultName, commentRaw) {
     throw new Error("Failed to update Notion page");
   }
 }
+
+// --------------- エントリーポイント ---------------
 
 module.exports = async (req, res) => {
   try {
@@ -392,10 +730,11 @@ module.exports = async (req, res) => {
     }
 
     if (req.method === "GET") {
-      // approveリンクから来た場合は「承認」を初期選択にする
+      const proposalHtml = await getProposalInfoHtmlFromApprovalPage(pageId);
       const html = renderForm({
         errorMessage: "",
         initialDecision: "承認",
+        proposalHtml,
       });
       res.statusCode = 200;
       res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -408,11 +747,12 @@ module.exports = async (req, res) => {
       const decision = params.get("decision") || "";
       const commentRaw = params.get("comment") || "";
 
-      // バリデーション
       if (!decision) {
+        const proposalHtml = await getProposalInfoHtmlFromApprovalPage(pageId);
         const html = renderForm({
           errorMessage: "承認／否認のいずれかを選択してください。",
           initialDecision: "",
+          proposalHtml,
         });
         res.statusCode = 400;
         res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -421,9 +761,11 @@ module.exports = async (req, res) => {
       }
 
       if (decision === "否認" && !commentRaw.trim()) {
+        const proposalHtml = await getProposalInfoHtmlFromApprovalPage(pageId);
         const html = renderForm({
           errorMessage: "否認の場合はコメントの入力が必須です。",
           initialDecision: "否認",
+          proposalHtml,
         });
         res.statusCode = 400;
         res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -431,10 +773,8 @@ module.exports = async (req, res) => {
         return;
       }
 
-      // Notion更新
       await updateApproval(pageId, decision, commentRaw);
 
-      // 完了メッセージ表示
       res.statusCode = 200;
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.end(`<!doctype html>
@@ -480,7 +820,6 @@ module.exports = async (req, res) => {
       return;
     }
 
-    // その他のメソッドは許可しない
     res.statusCode = 405;
     res.setHeader("Allow", "GET, POST");
     res.end("Method Not Allowed");
