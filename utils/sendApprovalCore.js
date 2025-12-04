@@ -43,6 +43,8 @@ async function notionRequest(path, method = "GET", body) {
  * 前提：
  * - 承認票DBに 会員DB へのリレーションプロパティ「会員」がある
  * - 会員DBに、文字列プロパティ「LINEユーザーID」がある
+ * - 会員DBに、セレクト「承認システム利用ステータス」がある（本番/テスト/停止）
+ * - 会員DBに、チェックボックス「LINE承認有効」がある
  */
 async function getLineUserIdsFromApprovalPage(approvalPageId) {
   const page = await notionRequest(`/pages/${approvalPageId}`, "GET");
@@ -67,12 +69,33 @@ async function getLineUserIdsFromApprovalPage(approvalPageId) {
     const memberPage = await notionRequest(`/pages/${memberId}`, "GET");
     const mProps = memberPage.properties;
 
+    // 1. 承認システム利用ステータス が "本番" 以外はスキップ
+    const statusProp = mProps["承認システム利用ステータス"];
+    let status = "";
+    if (statusProp && statusProp.type === "select" && statusProp.select) {
+      status = statusProp.select.name || "";
+    }
+    if (status !== "本番") {
+      continue;
+    }
+
+    // 2. LINE承認有効 が OFF の会員もスキップ
+    const lineEnabledProp = mProps["LINE承認有効"];
+    const lineEnabled =
+      lineEnabledProp && lineEnabledProp.type === "checkbox"
+        ? Boolean(lineEnabledProp.checkbox)
+        : false;
+    if (!lineEnabled) {
+      continue;
+    }
+
+    // 3. LINEユーザーID を取得
     const lineIdProp = mProps["LINEユーザーID"];
     if (!lineIdProp) continue;
 
     let value = "";
 
-    // 会員DB側の「LINEユーザーID」がどのタイプでもだいたい拾えるようにしておく
+    // LINEユーザーID がどのタイプでもだいたい拾えるようにしておく
     if (lineIdProp.type === "rich_text" && lineIdProp.rich_text.length > 0) {
       value = lineIdProp.rich_text.map((t) => t.plain_text).join("");
     } else if (lineIdProp.type === "title" && lineIdProp.title.length > 0) {
@@ -127,7 +150,7 @@ export async function sendApprovalMessage(approvalPageId) {
     throw new Error("LINE_CHANNEL_ACCESS_TOKEN is not set.");
   }
 
-  // 1. 宛先となる LINEユーザーID を取得（会員DB → LINEユーザーID）
+  // 1. 宛先となる LINEユーザーID を取得
   const lineUserIds = await getLineUserIdsFromApprovalPage(approvalPageId);
 
   if (!lineUserIds.length) {
@@ -141,7 +164,6 @@ export async function sendApprovalMessage(approvalPageId) {
   )}`;
 
   // 3. Flex メッセージ本体
-  //    内容は最小限。「承認依頼が届いています」＋「内容を確認する」ボタンのみ。
   const flexMessage = {
     type: "flex",
     altText: "【承認依頼】NPO法人ガレージ都農",
@@ -193,7 +215,7 @@ export async function sendApprovalMessage(approvalPageId) {
     },
   };
 
-  // 4. 宛先ごとに送信（春木・志帆 ほか該当会員全員）
+  // 4. 宛先ごとに送信（条件を満たす会員だけ）
   for (const to of lineUserIds) {
     await pushLineMessage(to, flexMessage);
   }
