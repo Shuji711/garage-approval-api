@@ -521,12 +521,13 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
       list-style: none;
     }
     .attachments-list li {
-      margin: 4px 0;
+      margin: 6px 0;
     }
     .attachments-list a {
       display: inline-block;
       min-width: 220px;
-      padding: 7px 12px;
+      min-height: 44px;       /* タップ領域確保 */
+      padding: 10px 16px;      /* 少し厚めに */
       border-radius: 999px;
       background: #eef3ff;
       border: 1px solid #c5d3f7;
@@ -578,7 +579,7 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
       box-shadow: 0 0 0 1px rgba(74,144,226,0.25);
     }
     .help {
-      font-size: 12px;
+      font-size: 13px;        /* 12 → 13 */
       color: #777;
       margin-top: 5px;
     }
@@ -602,7 +603,8 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
     }
     button[type="submit"] {
       min-width: 130px;
-      padding: 9px 18px;
+      min-height: 44px;       /* タップ領域確保 */
+      padding: 12px 24px;     /* 9→12, 18→24 */
       border-radius: 999px;
       border: none;
       font-size: 15px;
@@ -622,7 +624,7 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
     }
     .footer-note {
       margin-top: 12px;
-      font-size: 11px;
+      font-size: 12px;        /* 11 → 12 */
       color: #999;
       text-align: right;
     }
