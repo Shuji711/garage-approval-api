@@ -1,5 +1,5 @@
 // /api/approve.js
-// 承認フォーム表示 + 承認処理（コメント＆議案情報＆Driveファイル名対応版）
+// 承認フォーム表示 + 承認処理（コメント＆議案情報＆添付スロット＆Driveファイル名対応版）
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
@@ -183,6 +183,52 @@ async function getMemberNameFromApprovalPage(pageId) {
   return nameProp.title.map((t) => t.plain_text).join("");
 }
 
+// リッチテキスト or タイトルを文字列に
+function notionTextToString(prop) {
+  if (!prop) return "";
+  if (prop.type === "rich_text" && prop.rich_text.length) {
+    return prop.rich_text.map((t) => t.plain_text).join("");
+  }
+  if (prop.type === "title" && prop.title.length) {
+    return prop.title.map((t) => t.plain_text).join("");
+  }
+  return "";
+}
+
+// 添付スロットを収集（添付資料名 / 添付URL）
+function collectAttachmentSlots(props) {
+  const attachments = [];
+
+  // 共通処理
+  const addSlot = (nameKey, urlKey) => {
+    const urlProp = props[urlKey];
+    if (!urlProp || urlProp.type !== "url" || !urlProp.url) return;
+
+    const url = urlProp.url;
+    const nameProp = props[nameKey];
+    let label = notionTextToString(nameProp);
+    if (!label) {
+      // 名前が空の場合は汎用ラベル
+      label = "添付資料を開く";
+    }
+
+    attachments.push({
+      label,
+      url,
+    });
+  };
+
+  // 既存の無印スロット
+  addSlot("添付資料名", "添付URL");
+
+  // 添付資料名1〜5 / 添付URL1〜5
+  for (let i = 1; i <= 5; i++) {
+    addSlot(`添付資料名${i}`, `添付URL${i}`);
+  }
+
+  return attachments;
+}
+
 // 承認票ページ → 議案ページ → 議案情報をHTMLで返す
 async function getProposalInfoHtmlFromApprovalPage(pageId) {
   try {
@@ -255,7 +301,7 @@ async function getProposalInfoHtmlFromApprovalPage(pageId) {
       }
     }
 
-    // 提出者
+    // 作成者（提出者）
     let author = "";
     const submitterProp = props["提出者"];
     if (submitterProp) {
@@ -284,32 +330,48 @@ async function getProposalInfoHtmlFromApprovalPage(pageId) {
     const deadline = formatDateFromNotion(props["締切日"]);
     const effectiveUntil = formatDateFromNotion(props["施行期限"]);
 
-    // 添付資料（添付リンク）
-    let attachmentHtml = "";
-    const linkProp = props["添付リンク"];
-    if (linkProp && linkProp.type === "url" && linkProp.url) {
-      const url = linkProp.url;
-      let driveInfo = null;
-      try {
-        driveInfo = await getDriveFileInfo(url);
-      } catch (e) {
-        console.error("Drive info fetch error:", e);
-      }
+    // 添付資料スロット（外部URL系）
+    let attachments = collectAttachmentSlots(props);
 
-      if (driveInfo && driveInfo.name) {
-        const link = driveInfo.webViewLink || url;
-        const name = driveInfo.name;
-        attachmentHtml = `<a href="${escapeHtml(
-          link
-        )}" target="_blank" rel="noopener noreferrer">${escapeHtml(
-          name
-        )} を開く</a>`;
-      } else {
-        // Drive取得に失敗した場合は従来どおり
-        attachmentHtml = `<a href="${escapeHtml(
-          url
-        )}" target="_blank" rel="noopener noreferrer">添付資料を開く</a>`;
+    // 添付スロットが一つも無い場合のみ、Driveリンクを使う
+    if (attachments.length === 0) {
+      const linkProp = props["添付リンク"];
+      if (linkProp && linkProp.type === "url" && linkProp.url) {
+        const url = linkProp.url;
+        let driveInfo = null;
+        try {
+          driveInfo = await getDriveFileInfo(url);
+        } catch (e) {
+          console.error("Drive info fetch error:", e);
+        }
+
+        if (driveInfo && driveInfo.name) {
+          attachments.push({
+            label: driveInfo.name,
+            url: driveInfo.webViewLink || url,
+          });
+        } else {
+          attachments.push({
+            label: "添付資料を開く",
+            url,
+          });
+        }
       }
+    }
+
+    let attachmentHtml = "";
+    if (attachments.length > 0) {
+      const items = attachments
+        .map(
+          (a) =>
+            `<li><a href="${escapeHtml(
+              a.url
+            )}" target="_blank" rel="noopener noreferrer">${escapeHtml(
+              a.label
+            )}</a></li>`
+        )
+        .join("");
+      attachmentHtml = `<ul class="attachments-list">${items}</ul>`;
     }
 
     if (
@@ -326,6 +388,7 @@ async function getProposalInfoHtmlFromApprovalPage(pageId) {
 
     return `
       <div class="proposal-box">
+        <div class="proposal-header">議案情報</div>
         ${
           title
             ? `<div class="proposal-row"><span class="label">議案名</span><span class="value">${escapeHtml(
@@ -370,7 +433,7 @@ async function getProposalInfoHtmlFromApprovalPage(pageId) {
         }
         ${
           attachmentHtml
-            ? `<div class="proposal-row"><span class="label">添付書類</span><span class="value">${attachmentHtml}</span></div>`
+            ? `<div class="proposal-row proposal-row-attachments"><span class="label">添付資料</span><span class="value">${attachmentHtml}</span></div>`
             : ""
         }
       </div>
@@ -432,9 +495,14 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
       font-size: 13px;
       background: #f7f9fc;
       border-radius: 8px;
-      padding: 8px 10px;
-      margin-bottom: 12px;
+      padding: 8px 10px 10px;
+      margin-bottom: 14px;
       border: 1px solid #e0e6f2;
+    }
+    .proposal-header {
+      font-weight: 600;
+      font-size: 13px;
+      margin-bottom: 6px;
     }
     .proposal-row {
       display: flex;
@@ -447,6 +515,22 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
     .proposal-row .value {
       flex: 1;
       color: #222;
+    }
+    .proposal-row-attachments .value {
+      padding-top: 2px;
+    }
+    .attachments-list {
+      margin: 0;
+      padding-left: 1.1em;
+    }
+    .attachments-list li {
+      margin: 0;
+      padding: 0;
+      list-style: disc;
+      font-size: 13px;
+    }
+    .attachments-list a {
+      text-decoration: underline;
     }
     .field {
       margin-bottom: 12px;
@@ -534,11 +618,12 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
 <body>
   <div class="container">
     ${errorBlock}
-    ${proposalBlock}
     <h1>承認フォーム</h1>
     <div class="subtitle">
       議案の内容を確認し、承認または否認を選択してください。
     </div>
+
+    ${proposalBlock}
 
     <form id="approval-form" method="POST">
       <div class="field">
