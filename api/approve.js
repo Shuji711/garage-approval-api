@@ -622,6 +622,12 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
       background: #bcd4f2;
       color: #ffffffcc;
     }
+    .footer-note {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #999;
+      text-align: right;
+    }
   </style>
 </head>
 <body>
@@ -666,6 +672,10 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
 
       <div class="button-row">
         <button type="submit" id="submit-btn" disabled>送信する</button>
+      </div>
+
+      <div class="footer-note">
+        ボタンがグレーの間は、必要な項目が未入力です。
       </div>
     </form>
   </div>
