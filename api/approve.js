@@ -1,4 +1,4 @@
-// /api/approval.js
+// /api/approve.js
 // 承認フォーム表示 + 承認処理（コメント＆議案情報＆添付スロット＆Driveファイル名対応版）
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
@@ -526,8 +526,8 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
     .attachments-list a {
       display: inline-block;
       min-width: 220px;
-      min-height: 44px;       /* タップ領域確保 */
-      padding: 10px 16px;      /* 少し厚めに */
+      min-height: 44px;
+      padding: 10px 16px;
       border-radius: 999px;
       background: #eef3ff;
       border: 1px solid #c5d3f7;
@@ -603,8 +603,8 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
     }
     button[type="submit"] {
       min-width: 130px;
-      min-height: 44px;       /* タップ領域確保 */
-      padding: 12px 24px;     /* 9→12, 18→24 */
+      min-height: 44px;
+      padding: 12px 24px;
       border-radius: 999px;
       border: none;
       font-size: 15px;
