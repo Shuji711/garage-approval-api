@@ -1,8 +1,10 @@
 // /api/deny.js
-// 否認フォーム表示 + 否認処理（コメント必須・コメント保存版）
+// 承認フォーム表示 + 承認処理（初期選択を「否認」にしたバージョン）
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
+
+// --------------- 共通ユーティリティ ---------------
 
 async function parseBody(req) {
   return new Promise((resolve, reject) => {
@@ -17,7 +19,312 @@ async function parseBody(req) {
   });
 }
 
-function renderForm({ errorMessage, initialDecision }) {
+// HTMLエスケープ
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// YYYY-MM-DD → YYYY/MM/DD 表示用
+function formatDateFromNotion(dateProp) {
+  if (!dateProp || dateProp.type !== "date" || !dateProp.date || !dateProp.date.start) {
+    return "";
+  }
+  const s = dateProp.date.start; // "2025-12-04T..." or "2025-12-04"
+  const d = s.slice(0, 10);
+  return d.replace(/-/g, "/");
+}
+
+// リッチテキスト or タイトルを文字列に
+function notionTextToString(prop) {
+  if (!prop) return "";
+  if (prop.type === "rich_text" && prop.rich_text.length) {
+    return prop.rich_text.map((t) => t.plain_text).join("");
+  }
+  if (prop.type === "title" && prop.title.length) {
+    return prop.title.map((t) => t.plain_text).join("");
+  }
+  return "";
+}
+
+// --------------- Notion 関連 ---------------
+
+// 承認票ページ → 会員ページ → 氏名取得
+async function getMemberNameFromApprovalPage(pageId) {
+  const pageRes = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${NOTION_API_KEY}`,
+      "Notion-Version": NOTION_VERSION,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!pageRes.ok) {
+    console.error("getMemberName page error:", await pageRes.text());
+    return "";
+  }
+
+  const page = await pageRes.json();
+  const memberProp = page.properties["会員"];
+  if (
+    !memberProp ||
+    memberProp.type !== "relation" ||
+    !memberProp.relation.length
+  ) {
+    return "";
+  }
+
+  const memberId = memberProp.relation[0].id;
+  const memberRes = await fetch(
+    `https://api.notion.com/v1/pages/${memberId}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${NOTION_API_KEY}`,
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  if (!memberRes.ok) {
+    console.error("getMemberName member error:", await memberRes.text());
+    return "";
+  }
+
+  const memberPage = await memberRes.json();
+  const nameProp = memberPage.properties["氏名"];
+  if (!nameProp || nameProp.type !== "title" || !nameProp.title.length) {
+    return "";
+  }
+  return nameProp.title.map((t) => t.plain_text).join("");
+}
+
+// 添付スロットを収集（添付資料名 / 添付URL）
+function collectAttachmentSlots(props) {
+  const attachments = [];
+
+  const addSlot = (nameKey, urlKey) => {
+    const urlProp = props[urlKey];
+    if (!urlProp || urlProp.type !== "url" || !urlProp.url) return;
+
+    const url = urlProp.url;
+    const nameProp = props[nameKey];
+    let label = notionTextToString(nameProp);
+    if (!label) {
+      label = "添付資料を開く";
+    }
+
+    attachments.push({ label, url });
+  };
+
+  // 無印
+  addSlot("添付資料名", "添付URL");
+  // 1〜5
+  for (let i = 1; i <= 5; i++) {
+    addSlot(`添付資料名${i}`, `添付URL${i}`);
+  }
+
+  return attachments;
+}
+
+// 承認票ページ → 議案ページ → 議案情報をHTMLで返す
+async function getProposalInfoHtmlFromApprovalPage(pageId) {
+  try {
+    const pageRes = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${NOTION_API_KEY}`,
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!pageRes.ok) {
+      console.error("getProposalInfo approval error:", await pageRes.text());
+      return "";
+    }
+
+    const approvalPage = await pageRes.json();
+    const rel = approvalPage.properties["議案"];
+    if (!rel || rel.type !== "relation" || !rel.relation.length) {
+      return "";
+    }
+
+    const proposalId = rel.relation[0].id;
+    const propRes = await fetch(
+      `https://api.notion.com/v1/pages/${proposalId}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${NOTION_API_KEY}`,
+          "Notion-Version": NOTION_VERSION,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    if (!propRes.ok) {
+      console.error("getProposalInfo proposal error:", await propRes.text());
+      return "";
+    }
+
+    const proposalPage = await propRes.json();
+    const props = proposalPage.properties;
+
+    // 議案名
+    let title = "";
+    const titleProp = props["議案"];
+    if (titleProp && titleProp.type === "title" && titleProp.title.length) {
+      title = titleProp.title.map((t) => t.plain_text).join("");
+    }
+
+    // 議案番号（フォーミュラ優先）
+    let number = "";
+    const numFormulaProp = props["議案番号フォーミュラ"];
+    if (
+      numFormulaProp &&
+      numFormulaProp.type === "formula" &&
+      numFormulaProp.formula.type === "string"
+    ) {
+      number = numFormulaProp.formula.string || "";
+    }
+    if (!number) {
+      const numProp = props["議案番号"];
+      if (numProp) {
+        if (numProp.type === "rich_text" && numProp.rich_text.length) {
+          number = numProp.rich_text.map((t) => t.plain_text).join("");
+        } else if (numProp.type === "number" && numProp.number != null) {
+          number = String(numProp.number);
+        }
+      }
+    }
+
+    // 作成者
+    let author = "";
+    const submitterProp = props["提出者"];
+    if (submitterProp) {
+      if (submitterProp.type === "people" && submitterProp.people.length) {
+        author = submitterProp.people
+          .map((p) => p.name || "")
+          .filter(Boolean)
+          .join("・");
+      } else if (
+        submitterProp.type === "rich_text" &&
+        submitterProp.rich_text.length
+      ) {
+        author = submitterProp.rich_text.map((t) => t.plain_text).join("");
+      } else if (
+        submitterProp.type === "multi_select" &&
+        submitterProp.multi_select.length
+      ) {
+        author = submitterProp.multi_select.map((t) => t.name).join("・");
+      }
+    }
+
+    // 提出日
+    const submittedAt = formatDateFromNotion(props["提出日"]);
+
+    // 締切日 / 施行期限
+    const deadline = formatDateFromNotion(props["締切日"]);
+    const effectiveUntil = formatDateFromNotion(props["施行期限"]);
+
+    // 添付（外部URL系スロット）
+    let attachments = collectAttachmentSlots(props);
+
+    let attachmentHtml = "";
+    if (attachments.length > 0) {
+      const items = attachments
+        .map(
+          (a) =>
+            `<li><a href="${escapeHtml(
+              a.url
+            )}" target="_blank" rel="noopener noreferrer">${escapeHtml(
+              a.label
+            )}</a></li>`
+        )
+        .join("");
+      attachmentHtml = `<ul class="attachments-list">${items}</ul>`;
+    }
+
+    if (
+      !title &&
+      !number &&
+      !author &&
+      !submittedAt &&
+      !deadline &&
+      !effectiveUntil &&
+      !attachmentHtml
+    ) {
+      return "";
+    }
+
+    return `
+      <div class="proposal-box">
+        <div class="proposal-header">議案情報</div>
+        ${
+          title
+            ? `<div class="proposal-row"><span class="label">議案名</span><span class="value">${escapeHtml(
+                title
+              )}</span></div>`
+            : ""
+        }
+        ${
+          number
+            ? `<div class="proposal-row"><span class="label">議案番号</span><span class="value">${escapeHtml(
+                number
+              )}</span></div>`
+            : ""
+        }
+        ${
+          author
+            ? `<div class="proposal-row"><span class="label">作成者</span><span class="value">${escapeHtml(
+                author
+              )}</span></div>`
+            : ""
+        }
+        ${
+          submittedAt
+            ? `<div class="proposal-row"><span class="label">提出日</span><span class="value">${escapeHtml(
+                submittedAt
+              )}</span></div>`
+            : ""
+        }
+        ${
+          deadline
+            ? `<div class="proposal-row"><span class="label">締切日</span><span class="value">${escapeHtml(
+                deadline
+              )}</span></div>`
+            : ""
+        }
+        ${
+          effectiveUntil
+            ? `<div class="proposal-row"><span class="label">施行期限</span><span class="value">${escapeHtml(
+                effectiveUntil
+              )}</span></div>`
+            : ""
+        }
+        ${
+          attachmentHtml
+            ? `<div class="proposal-row proposal-row-attachments"><span class="label">添付資料</span><span class="value">${attachmentHtml}</span></div>`
+            : ""
+        }
+      </div>
+    `;
+  } catch (e) {
+    console.error("getProposalInfo exception:", e);
+    return "";
+  }
+}
+
+// --------------- HTML レンダリング ---------------
+
+function renderForm({ errorMessage, initialDecision, proposalHtml }) {
   const errorBlock = errorMessage
     ? `<div class="error-global">
          ${errorMessage}
@@ -28,6 +335,8 @@ function renderForm({ errorMessage, initialDecision }) {
     initialDecision === "承認" ? 'checked="checked"' : "";
   const checkedDeny =
     initialDecision === "否認" ? 'checked="checked"' : "";
+
+  const proposalBlock = proposalHtml || "";
 
   return `<!doctype html>
 <html lang="ja">
@@ -40,49 +349,110 @@ function renderForm({ errorMessage, initialDecision }) {
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
         sans-serif;
       padding: 16px;
-      line-height: 1.6;
+      line-height: 1.7;
       background: #f5f5f7;
+      font-size: 15px;
     }
     .container {
-      max-width: 480px;
+      max-width: 540px;
       margin: 0 auto;
       background: #ffffff;
-      border-radius: 12px;
-      padding: 16px 20px 20px;
+      border-radius: 14px;
+      padding: 18px 22px 22px;
       box-shadow: 0 2px 8px rgba(0,0,0,0.08);
     }
     h1 {
-      font-size: 18px;
+      font-size: 19px;
       margin: 0 0 8px;
     }
     .subtitle {
-      font-size: 12px;
-      color: #666;
-      margin-bottom: 12px;
+      font-size: 13px;
+      color: #555;
+      margin-bottom: 14px;
+    }
+    .proposal-box {
+      font-size: 14px;
+      background: #f7f9fc;
+      border-radius: 10px;
+      padding: 10px 12px 12px;
+      margin-bottom: 16px;
+      border: 1px solid #e0e6f2;
+    }
+    .proposal-header {
+      font-weight: 600;
+      font-size: 14px;
+      margin-bottom: 6px;
+    }
+    .proposal-row {
+      display: flex;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+    .proposal-row .label {
+      width: 88px;
+      color: #555;
+    }
+    .proposal-row .value {
+      flex: 1;
+      color: #222;
+    }
+    .proposal-row-attachments .value {
+      padding-top: 2px;
+    }
+    .attachments-list {
+      margin: 0;
+      padding-left: 0;
+      list-style: none;
+    }
+    .attachments-list li {
+      margin: 6px 0;
+    }
+    .attachments-list a {
+      display: inline-block;
+      min-width: 220px;
+      min-height: 44px;
+      padding: 10px 16px;
+      border-radius: 999px;
+      background: #eef3ff;
+      border: 1px solid #c5d3f7;
+      font-size: 14px;
+      text-decoration: none;
+      color: #2255aa;
+      text-align: left;
+      box-sizing: border-box;
+    }
+    .attachments-list a:hover {
+      background: #dde7ff;
+      border-color: #93a9f0;
     }
     .field {
-      margin-bottom: 12px;
+      margin-bottom: 14px;
     }
     .field label {
       display: block;
-      font-size: 14px;
+      font-size: 15px;
       font-weight: 600;
-      margin-bottom: 4px;
+      margin-bottom: 5px;
     }
     .radio-group {
       display: flex;
-      gap: 16px;
-      font-size: 14px;
+      gap: 20px;
+      font-size: 15px;
+      align-items: center;
+    }
+    .radio-group input[type="radio"] {
+      transform: scale(1.1);
+      margin-right: 4px;
     }
     .radio-group label {
       font-weight: normal;
     }
     textarea {
       width: 100%;
-      min-height: 90px;
+      min-height: 110px;
       font-size: 14px;
-      padding: 8px;
-      border-radius: 6px;
+      padding: 9px;
+      border-radius: 7px;
       border: 1px solid #ccc;
       resize: vertical;
       box-sizing: border-box;
@@ -93,14 +463,14 @@ function renderForm({ errorMessage, initialDecision }) {
       box-shadow: 0 0 0 1px rgba(74,144,226,0.25);
     }
     .help {
-      font-size: 12px;
+      font-size: 13px;
       color: #777;
-      margin-top: 4px;
+      margin-top: 5px;
     }
     .error-global {
-      margin-bottom: 8px;
-      padding: 8px;
-      border-radius: 6px;
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      border-radius: 7px;
       background: #ffecec;
       color: #c00;
       font-size: 13px;
@@ -111,16 +481,17 @@ function renderForm({ errorMessage, initialDecision }) {
       margin-top: 4px;
     }
     .button-row {
-      margin-top: 16px;
+      margin-top: 18px;
       display: flex;
       justify-content: flex-end;
     }
     button[type="submit"] {
-      min-width: 120px;
-      padding: 8px 16px;
+      min-width: 130px;
+      min-height: 44px;
+      padding: 12px 24px;
       border-radius: 999px;
       border: none;
-      font-size: 14px;
+      font-size: 15px;
       font-weight: 600;
       cursor: pointer;
       background: #4a90e2;
@@ -137,7 +508,7 @@ function renderForm({ errorMessage, initialDecision }) {
     }
     .footer-note {
       margin-top: 12px;
-      font-size: 11px;
+      font-size: 12px;
       color: #999;
       text-align: right;
     }
@@ -150,6 +521,8 @@ function renderForm({ errorMessage, initialDecision }) {
     <div class="subtitle">
       議案の内容を確認し、承認または否認を選択してください。
     </div>
+
+    ${proposalBlock}
 
     <form id="approval-form" method="POST">
       <div class="field">
@@ -274,55 +647,7 @@ function renderForm({ errorMessage, initialDecision }) {
 </html>`;
 }
 
-async function getMemberNameFromApprovalPage(pageId) {
-  const pageRes = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${NOTION_API_KEY}`,
-      "Notion-Version": NOTION_VERSION,
-      "Content-Type": "application/json",
-    },
-  });
-
-  if (!pageRes.ok) {
-    return "";
-  }
-
-  const page = await pageRes.json();
-  const memberProp = page.properties["会員"];
-  if (
-    !memberProp ||
-    memberProp.type !== "relation" ||
-    !memberProp.relation.length
-  ) {
-    return "";
-  }
-
-  const memberId = memberProp.relation[0].id;
-  const memberRes = await fetch(
-    `https://api.notion.com/v1/pages/${memberId}`,
-    {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${NOTION_API_KEY}`,
-        "Notion-Version": NOTION_VERSION,
-        "Content-Type": "application/json",
-      },
-    }
-  );
-
-  if (!memberRes.ok) {
-    return "";
-  }
-
-  const memberPage = await memberRes.json();
-  const nameProp = memberPage.properties["氏名"];
-  if (!nameProp || nameProp.type !== "title" || !nameProp.title.length) {
-    return "";
-  }
-  return nameProp.title[0].plain_text || "";
-}
-
+// Notion更新（承認結果 + 承認日時 + コメント）
 async function updateApproval(pageId, resultName, commentRaw) {
   const now = new Date().toISOString();
 
@@ -374,6 +699,8 @@ async function updateApproval(pageId, resultName, commentRaw) {
   }
 }
 
+// --------------- エントリーポイント ---------------
+
 module.exports = async (req, res) => {
   try {
     const url = new URL(req.url, `https://${req.headers.host}`);
@@ -387,10 +714,11 @@ module.exports = async (req, res) => {
     }
 
     if (req.method === "GET") {
-      // denyリンクから来た場合は「否認」を初期選択にする
+      const proposalHtml = await getProposalInfoHtmlFromApprovalPage(pageId);
       const html = renderForm({
         errorMessage: "",
-        initialDecision: "否認",
+        initialDecision: "否認", // ★ここだけ違う（デフォルト否認）
+        proposalHtml,
       });
       res.statusCode = 200;
       res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -404,9 +732,11 @@ module.exports = async (req, res) => {
       const commentRaw = params.get("comment") || "";
 
       if (!decision) {
+        const proposalHtml = await getProposalInfoHtmlFromApprovalPage(pageId);
         const html = renderForm({
           errorMessage: "承認／否認のいずれかを選択してください。",
-          initialDecision: "",
+          initialDecision: "否認",
+          proposalHtml,
         });
         res.statusCode = 400;
         res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -415,9 +745,11 @@ module.exports = async (req, res) => {
       }
 
       if (decision === "否認" && !commentRaw.trim()) {
+        const proposalHtml = await getProposalInfoHtmlFromApprovalPage(pageId);
         const html = renderForm({
           errorMessage: "否認の場合はコメントの入力が必須です。",
           initialDecision: "否認",
+          proposalHtml,
         });
         res.statusCode = 400;
         res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -441,7 +773,7 @@ module.exports = async (req, res) => {
         sans-serif;
       padding: 16px;
       background: #f5f5f7;
-      line-height: 1.6;
+      line-height: 1.7;
     }
     .container {
       max-width: 480px;
@@ -453,7 +785,7 @@ module.exports = async (req, res) => {
       text-align: center;
     }
     h1 {
-      font-size: 18px;
+      font-size: 19px;
       margin-bottom: 8px;
     }
     p {
