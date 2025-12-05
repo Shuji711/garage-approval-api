@@ -8,12 +8,16 @@ const APPROVAL_DB_ID = process.env.NOTION_APPROVAL_DB_ID;
 const MEMBER_DB_ID = process.env.NOTION_MEMBER_DB_ID;
 
 /**
- * 会員DBのロール判定用定数
- * ※ 必ずあなたの会員DBの実際のプロパティ名・選択肢に合わせて変更してください
+ * 会員DBのプロパティ定義
+ * ※ Notion の実プロパティ名に合わせてある
  */
-const MEMBER_ROLE_PROP = "区分";        // 例：「区分」「会員種別」など
-const ROLE_VALUE_BOARD = "理事";       // 例：理事会対象のロール名
-const ROLE_VALUE_MEMBER = "正会員";    // 例：社員総会／正会員対象のロール名
+const MEMBER_PROP_NAME = "氏名"; // 氏名（タイトル）でもOK。実際は「氏名」列だが、タイトルを優先的に拾う
+const MEMBER_PROP_LINE_ID = "LINEユーザーID";
+const MEMBER_PROP_IS_BOARD = "理事";                // チェックボックス
+const MEMBER_PROP_IS_MEMBER = "正会員";            // チェックボックス
+const MEMBER_PROP_STATUS = "承認システム利用ステータス"; // セレクト
+const MEMBER_STATUS_ACTIVE = "本番";
+const MEMBER_PROP_LINE_ENABLED = "LINE承認有効";   // チェックボックス
 
 /**
  * Notion 共通ヘッダ
@@ -35,13 +39,13 @@ async function getPage(pageId) {
     headers: notionHeaders(),
   });
 
+  const text = await res.text();
   if (!res.ok) {
-    const text = await res.text();
     console.error("Notion getPage error:", text);
-    throw new Error("Failed to fetch Notion page");
+    throw new Error(`Failed to fetch Notion page: ${text}`);
   }
 
-  return await res.json();
+  return JSON.parse(text);
 }
 
 /**
@@ -54,13 +58,13 @@ async function queryDatabase(databaseId, body) {
     body: JSON.stringify(body),
   });
 
+  const text = await res.text();
   if (!res.ok) {
-    const text = await res.text();
     console.error("Notion queryDatabase error:", text);
-    throw new Error("Failed to query Notion database");
+    throw new Error(`Failed to query Notion database: ${text}`);
   }
 
-  return await res.json();
+  return JSON.parse(text);
 }
 
 /**
@@ -80,29 +84,45 @@ function extractText(prop) {
 /**
  * 承認対象に応じて会員DBのフィルタ条件を返す
  * - 議案DBの select プロパティ「承認対象」を想定
- * - 実際のオプション名に応じて条件分岐を調整してください
  */
 function buildMemberFilter(approvalTargetName) {
-  if (!approvalTargetName) return null;
+  let roleFilter = null;
 
-  // 例1：承認対象 = 「理事会」 → 理事のみ
   if (approvalTargetName === "理事会") {
-    return {
-      property: MEMBER_ROLE_PROP,
-      select: { equals: ROLE_VALUE_BOARD },
+    // 理事チェック済み
+    roleFilter = {
+      property: MEMBER_PROP_IS_BOARD,
+      checkbox: { equals: true },
     };
+  } else if (approvalTargetName === "正会員" || approvalTargetName === "社員総会") {
+    // 正会員チェック済み
+    roleFilter = {
+      property: MEMBER_PROP_IS_MEMBER,
+      checkbox: { equals: true },
+    };
+  } else {
+    return null;
   }
 
-  // 例2：承認対象 = 「正会員」 or 「社員総会」 → 正会員のみ
-  if (approvalTargetName === "正会員" || approvalTargetName === "社員総会") {
-    return {
-      property: MEMBER_ROLE_PROP,
-      select: { equals: ROLE_VALUE_MEMBER },
-    };
+  const filters = [roleFilter];
+
+  // 承認システム利用ステータス = 本番
+  filters.push({
+    property: MEMBER_PROP_STATUS,
+    select: { equals: MEMBER_STATUS_ACTIVE },
+  });
+
+  // LINE承認有効 = true
+  filters.push({
+    property: MEMBER_PROP_LINE_ENABLED,
+    checkbox: { equals: true },
+  });
+
+  if (filters.length === 1) {
+    return filters[0];
   }
 
-  // それ以外：まだ設計していない承認対象
-  return null;
+  return { and: filters };
 }
 
 /**
@@ -165,7 +185,7 @@ module.exports = async (req, res) => {
 
     // 3. 会員DBから対象メンバーを取得
     const memberQueryBody = {
-      page_size: 100, // 理事・正会員の人数的には十分なはず。足りなければ paging 実装
+      page_size: 100,
       filter: memberFilter,
     };
 
@@ -215,13 +235,19 @@ module.exports = async (req, res) => {
 
       const memberProps = memberPage.properties || {};
 
+      const memberNameTitle =
+        memberProps["名前"] && memberProps["名前"].title
+          ? extractText(memberProps["名前"])
+          : "";
       const memberNameProp =
-        memberProps["名前"] ||
-        memberProps["氏名"] ||
-        memberProps["会員名"];
-      const memberName = extractText(memberNameProp) || "承認者";
+        memberProps[MEMBER_PROP_NAME] || memberProps["氏名"] || memberProps["会員名"];
 
-      const lineIdProp = memberProps["LINEユーザーID文字列"];
+      const memberName =
+        memberNameTitle ||
+        extractText(memberNameProp) ||
+        "承認者";
+
+      const lineIdProp = memberProps[MEMBER_PROP_LINE_ID];
       const lineUserId = extractText(lineIdProp); // 空でもOK
 
       const ticketTitle = `${proposalTitle}／${memberName}`;
@@ -262,8 +288,6 @@ module.exports = async (req, res) => {
           "コメント（表示用）": {
             rich_text: [],
           },
-          // approveURL / denyURL / 送信URL は
-          // ここでは空で作成し、別処理や別APIで更新してもよい
         },
       };
 
@@ -273,13 +297,13 @@ module.exports = async (req, res) => {
         body: JSON.stringify(body),
       });
 
+      const createText = await createRes.text();
       if (!createRes.ok) {
-        const text = await createRes.text();
-        console.error("Notion create ticket error:", text);
-        throw new Error("承認票の作成に失敗しました");
+        console.error("Notion create ticket error:", createText);
+        throw new Error(`承認票の作成に失敗しました: ${createText}`);
       }
 
-      const ticketPage = await createRes.json();
+      const ticketPage = JSON.parse(createText);
 
       createdTickets.push({
         ticketId: ticketPage.id,
