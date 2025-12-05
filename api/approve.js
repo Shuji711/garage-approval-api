@@ -1,4 +1,4 @@
-// /api/approve.js
+// /api/approval.js
 // 承認フォーム表示 + 承認処理（コメント＆議案情報＆添付スロット＆Driveファイル名対応版）
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
