@@ -1,5 +1,5 @@
 // /api/deny.js
-// 承認フォーム表示 + 承認処理（初期選択を「否認」にしたバージョン）
+// 承認フォーム表示 + 承認処理（初期選択「否認」版）
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
@@ -506,12 +506,6 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
       background: #bcd4f2;
       color: #ffffffcc;
     }
-    .footer-note {
-      margin-top: 12px;
-      font-size: 12px;
-      color: #999;
-      text-align: right;
-    }
   </style>
 </head>
 <body>
@@ -556,10 +550,6 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
 
       <div class="button-row">
         <button type="submit" id="submit-btn" disabled>送信する</button>
-      </div>
-
-      <div class="footer-note">
-        ボタンがグレーの間は、必要な項目が未入力です。
       </div>
     </form>
   </div>
@@ -717,7 +707,7 @@ module.exports = async (req, res) => {
       const proposalHtml = await getProposalInfoHtmlFromApprovalPage(pageId);
       const html = renderForm({
         errorMessage: "",
-        initialDecision: "否認", // ★ここだけ違う（デフォルト否認）
+        initialDecision: "否認", // デフォルトで「否認」にチェック
         proposalHtml,
       });
       res.statusCode = 200;
