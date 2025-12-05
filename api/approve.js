@@ -633,7 +633,7 @@ function renderForm({ errorMessage, initialDecision, proposalHtml }) {
 <body>
   <div class="container">
     ${errorBlock}
-    <h1>承認フォーム</h1>
+    <h1>承認フォーム（テスト）</h1>
     <div class="subtitle">
       議案の内容を確認し、承認または否認を選択してください。
     </div>
