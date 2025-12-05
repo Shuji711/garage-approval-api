@@ -14,6 +14,15 @@ const NOTION_VERSION = "2022-06-28";
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 
+// 承認フォームURLからドメイン部分を取り出して approve/deny のベースURLを作る
+// 例）https://approval.garagetsuno.org/approval
+//      → origin = https://approval.garagetsuno.org
+//      → approve = https://approval.garagetsuno.org/approve
+//      → deny    = https://approval.garagetsuno.org/deny
+const APPROVAL_ORIGIN = new URL(APPROVAL_FORM_BASE_URL).origin;
+const APPROVE_URL_BASE = `${APPROVAL_ORIGIN}/approve`;
+const DENY_URL_BASE = `${APPROVAL_ORIGIN}/deny`;
+
 /**
  * Notion API 共通呼び出し
  */
@@ -158,10 +167,30 @@ export async function sendApprovalMessage(approvalPageId) {
     throw new Error("No LINE user IDs found for this approval ticket.");
   }
 
-  // 2. 承認フォームへのURLを組み立て
+  // 2. 各種URLを組み立て
   const approvalUrl = `${APPROVAL_FORM_BASE_URL}?id=${encodeURIComponent(
     approvalPageId
   )}`;
+  const approveUrl = `${APPROVE_URL_BASE}?id=${encodeURIComponent(
+    approvalPageId
+  )}`;
+  const denyUrl = `${DENY_URL_BASE}?id=${encodeURIComponent(approvalPageId)}`;
+
+  // 2.5 承認票DBページに URL を書き込む
+  // 承認票DB 必須プロパティ：
+  //   送信URL, approveURL, denyURL
+  try {
+    await notionRequest(`/pages/${approvalPageId}`, "PATCH", {
+      properties: {
+        送信URL: { url: approvalUrl },
+        approveURL: { url: approveUrl },
+        denyURL: { url: denyUrl },
+      },
+    });
+  } catch (e) {
+    // URL書き込みに失敗しても、LINE送信自体は続行する（ログだけ出す）
+    console.error("Failed to update approval URLs on Notion page:", e);
+  }
 
   // 3. Flex メッセージ本体
   const flexMessage = {
