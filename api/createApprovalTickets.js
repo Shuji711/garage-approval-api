@@ -272,8 +272,8 @@ module.exports = async (req, res) => {
           "会員": {
             relation: [{ id: memberPageId }],
           },
-          // LINEユーザーID文字列（テキスト）
-          "LINEユーザーID文字列": lineUserId
+          // LINEユーザーID
+          "LINEユーザーID": lineUserId
             ? {
                 rich_text: [
                   {
@@ -284,8 +284,8 @@ module.exports = async (req, res) => {
             : {
                 rich_text: [],
               },
-          // コメント（表示用）は空で初期化
-          "コメント（表示用）": {
+          // コメントは空で初期化
+          "コメント": {
             rich_text: [],
           },
         },
