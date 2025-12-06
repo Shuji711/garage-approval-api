@@ -1,4 +1,4 @@
-// api/approve.js
+// /api/approve.js
 // 承認票に「承認」を1回だけ記録するAPI
 // - GET : 承認フォーム or 「回答済み」表示
 // - POST: 未回答のときだけ 承認結果・承認日時・コメント を書き込む
@@ -38,7 +38,7 @@ function extractText(prop) {
   return "";
 }
 
-function renderHtml({ title, message, showForm, id }) {
+function renderHtml({ title, message, note, showForm, id }) {
   // シンプルなHTML。UTF-8固定。
   return `<!doctype html>
 <html lang="ja">
@@ -54,7 +54,9 @@ function renderHtml({ title, message, showForm, id }) {
     button { padding: 8px 16px; border-radius: 4px; border: none; cursor: pointer; }
     button.approve { background: #2e7d32; color: #fff; }
     .message { margin: 12px 0; color: #333; }
-    .note { font-size: 0.85rem; color: #666; margin-top: 12px; }
+    .note { font-size: 0.85rem; margin-top: 12px; }
+    .note.warn { color: #d32f2f; }
+    .note.info { color: #666; }
   </style>
 </head>
 <body>
@@ -69,9 +71,14 @@ function renderHtml({ title, message, showForm, id }) {
             <div style="margin-top: 16px;">
               <button type="submit" class="approve">承認を送信する</button>
             </div>
-            <p class="note">※ この承認票には 1 度だけ回答できます。送信後の取り消し・修正はできません。</p>
+            <p class="note info">※ この承認票には 1 度だけ回答できます。送信後の取り消し・修正はできません。</p>
           </form>`
-        : `<p class="note">この画面は閉じていただいて構いません。</p>`
+        : ""
+    }
+    ${
+      note
+        ? `<p class="note ${note.type === "warn" ? "warn" : "info"}">${note.text}</p>`
+        : ""
     }
   </div>
 </body>
@@ -125,10 +132,14 @@ module.exports = async (req, res) => {
           : null;
 
       if (already) {
-        const msg = `この承認票はすでに「${already}」として登録されています。<br>再度の変更や修正はできません。必要な場合は事務局までご連絡ください。`;
+        // ▼ 2回目以降にだけ表示したいメッセージ
         const html = renderHtml({
           title: ticketTitle,
-          message: msg,
+          message: `この承認票はすでに「${already}」として登録されています。`,
+          note: {
+            type: "warn",
+            text: "送信内容の変更や再回答はできません。必要な場合は事務局までご連絡ください。",
+          },
           showForm: false,
           id,
         });
@@ -136,10 +147,12 @@ module.exports = async (req, res) => {
         return res.status(200).end(html);
       }
 
-      const msg = "この議案に「承認」として回答します。内容を確認のうえ、必要であればコメントを入力して送信してください。";
+      // ▼ 初回アクセス（未回答）のみ、フォームを表示
       const html = renderHtml({
         title: ticketTitle,
-        message: msg,
+        message:
+          "この議案に「承認」として回答します。内容を確認のうえ、必要であればコメントを入力して送信してください。",
+        note: null,
         showForm: true,
         id,
       });
@@ -158,13 +171,18 @@ module.exports = async (req, res) => {
           ? resultProp.select.name
           : null;
 
+      const titleProp = props["名前"] || props["タイトル"];
+      const ticketTitle = extractText(titleProp) || "承認票";
+
       if (already) {
-        const titleProp = props["名前"] || props["タイトル"];
-        const ticketTitle = extractText(titleProp) || "承認票";
-        const msg = `この承認票はすでに「${already}」として登録されています。<br>再度の回答は受け付けていません。必要な場合は事務局までご連絡ください。`;
+        // ▼ 既に結果が入っている場合は更新せず注意メッセージのみ
         const html = renderHtml({
           title: ticketTitle,
-          message: msg,
+          message: `この承認票はすでに「${already}」として登録されています。`,
+          note: {
+            type: "warn",
+            text: "送信内容の変更や再回答はできません。必要な場合は事務局までご連絡ください。",
+          },
           showForm: false,
           id,
         });
@@ -172,6 +190,7 @@ module.exports = async (req, res) => {
         return res.status(200).end(html);
       }
 
+      // ▼ ここは「初回の POST」だけ通る
       const form = await parseFormBody(req);
       const comment = form.comment || "";
       const now = new Date().toISOString();
@@ -206,16 +225,19 @@ module.exports = async (req, res) => {
       if (!updateRes.ok) {
         console.error("Notion update (approve) error:", text);
         res.statusCode = 500;
-        return res.end("承認の登録に失敗しました。時間をおいて再度お試しください。");
+        return res.end(
+          "承認の登録に失敗しました。時間をおいて再度お試しください。"
+        );
       }
 
-      const titleProp = props["名前"] || props["タイトル"];
-      const ticketTitle = extractText(titleProp) || "承認票";
-
-      const msg = "承認を受け付けました。ご回答ありがとうございます。";
+      // ▼ 初回の完了画面：ここでは「すでに承認済み」系の文言は出さない
       const html = renderHtml({
         title: ticketTitle,
-        message: msg,
+        message: "承認を受け付けました。ご回答ありがとうございます。",
+        note: {
+          type: "info",
+          text: "この画面は閉じていただいて構いません。",
+        },
         showForm: false,
         id,
       });
