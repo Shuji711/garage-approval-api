@@ -3,6 +3,7 @@
 // 承認票ID(pageId)を受け取り、議案情報＋承認/否認フォームを表示。
 // 1度回答した承認票はロックし、2回目以降は「回答済み」と表示する。
 // 添付資料は最大5件まで表示し、あれば「添付資料名」プロパティをラベルとして利用する。
+// 否認の場合はコメント必須。完了画面には結果・日時・コメントのみ表示する。
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
@@ -46,12 +47,9 @@ function extractText(prop) {
 function extractAttachments(pProps) {
   const attachments = [];
 
-  // index = 0 用（添付URL / 添付資料名）
   const patterns = [
     { urlKey: "添付URL", labelKey: "添付資料名" },
   ];
-
-  // 添付URL1〜5 / 添付資料名1〜5 を順番に追加
   for (let i = 1; i <= 5; i++) {
     patterns.push({
       urlKey: `添付URL${i}`,
@@ -78,7 +76,6 @@ function extractAttachments(pProps) {
     let label = labelProp ? extractText(labelProp).trim() : "";
 
     if (!label) {
-      // ラベルがなければデフォルト名
       const index = attachments.length + 1;
       label = attachments.length === 0 ? "添付資料を開く" : `添付資料${index}`;
     }
@@ -89,17 +86,33 @@ function extractAttachments(pProps) {
   return attachments;
 }
 
+function formatDateTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${y}-${m}-${day} ${hh}:${mm}`;
+}
+
 // シンプルなHTMLレンダリング（モバイルファースト・Apple HIG寄せ）
 function renderHtml({
   ticketTitle,
   proposalTitle,
   authorName,
   description,
-  attachments, // [{url, label}]
-  alreadyResult, // "承認" / "否認" / null
+  attachments,     // [{url, label}]
+  alreadyResult,   // "承認" / "否認" / null
   showForm,
   pageId,
   message,
+  defaultDecision, // "approve" | "deny"
+  resultName,      // 完了画面用の結果表示 ("承認" / "否認")
+  commentText,     // 完了画面用コメント
+  approvalDateStr, // 完了画面用日時文字列
 }) {
   const safeMessage = message || "";
   const infoLines = [];
@@ -119,15 +132,19 @@ function renderHtml({
     ? `<div class="info-block">${infoLines.join("")}</div>`
     : "";
 
-  const descHtml = description
-    ? `<div class="section">
-         <div class="section-title">内容（説明）</div>
-         <div class="section-body">${description.replace(/\n/g, "<br>")}</div>
-       </div>`
-    : "";
+  // 詳細表示は「まだ回答していないときのみ」
+  const showDetails = !alreadyResult && showForm;
+
+  const descHtml =
+    showDetails && description
+      ? `<div class="section">
+           <div class="section-title">内容（説明）</div>
+           <div class="section-body">${description.replace(/\n/g, "<br>")}</div>
+         </div>`
+      : "";
 
   let attachHtml = "";
-  if (attachments && attachments.length > 0) {
+  if (showDetails && attachments && attachments.length > 0) {
     const items = attachments
       .map(
         (att) =>
@@ -146,6 +163,27 @@ function renderHtml({
       </div>`;
   }
 
+  // 完了後に表示する結果・コメント
+  let resultBlock = "";
+  if (alreadyResult || resultName) {
+    const rn = resultName || alreadyResult || "";
+    const ct = (commentText && commentText.trim()) ? commentText.trim() : "（コメントなし）";
+    const dt = approvalDateStr || "";
+    resultBlock = `
+      <div class="section">
+        <div class="section-title">結果</div>
+        <div class="section-body">
+          <div>結果：${rn || "—"}</div>
+          ${dt ? `<div>日時：${dt}</div>` : ""}
+        </div>
+      </div>
+      <div class="section">
+        <div class="section-title">コメント</div>
+        <div class="section-body">${ct.replace(/\n/g, "<br>")}</div>
+      </div>
+    `;
+  }
+
   // ★ 初回（message があるとき）は赤い「すでに承認済み」メッセージを出さない
   const statusHtml =
     alreadyResult && !safeMessage
@@ -155,16 +193,22 @@ function renderHtml({
          </div>`
       : "";
 
+  const decision = defaultDecision === "deny" ? "deny" : "approve";
+
   const formHtml = showForm
     ? `<form method="POST" action="/api/sendApprovalGet?pageId=${pageId}">
          <fieldset class="field-group">
            <legend class="field-title">承認／否認</legend>
            <label class="radio-row">
-             <input type="radio" name="decision" value="approve" checked />
+             <input type="radio" name="decision" value="approve" ${
+               decision === "deny" ? "" : "checked"
+             } />
              <span>承認する</span>
            </label>
            <label class="radio-row">
-             <input type="radio" name="decision" value="deny" />
+             <input type="radio" name="decision" value="deny" ${
+               decision === "deny" ? "checked" : ""
+             } />
              <span>否認する</span>
            </label>
          </fieldset>
@@ -178,7 +222,8 @@ function renderHtml({
 
          <p class="note">
            ・承認／否認どちらの場合もコメントを記入できます。<br>
-           ・この承認票には 1 度だけ回答できます。送信後の取り消し・修正はできません。
+           ・この承認票には 1 度だけ回答できます。送信後の取り消し・修正はできません。<br>
+           ・否認を選択した場合はコメントの入力が必須です。
          </p>
 
          <div class="actions">
@@ -234,7 +279,7 @@ function renderHtml({
     .message {
       margin-bottom: 12px;
       font-size: 14px;
-      color: var(--text-sub);
+      color: var(--danger);
     }
     .info-card {
       border-radius: 12px;
@@ -388,6 +433,7 @@ function renderHtml({
       ${attachHtml}
     </div>
     ${statusHtml}
+    ${resultBlock}
     ${formHtml}
   </div>
 </body>
@@ -441,6 +487,17 @@ module.exports = async (req, res) => {
         ? resultProp.select.name
         : null;
 
+    // コメント（完了画面用）
+    const commentProp = tProps["コメント"];
+    const storedComment = extractText(commentProp) || "";
+
+    // 承認日時（完了画面用）
+    let approvalDateStr = "";
+    const approveDateProp = tProps["承認日時"];
+    if (approveDateProp && approveDateProp.date && approveDateProp.date.start) {
+      approvalDateStr = formatDateTime(approveDateProp.date.start);
+    }
+
     // 関連議案を取得（1件想定）
     let proposalTitle = "";
     let authorName = "";
@@ -461,7 +518,6 @@ module.exports = async (req, res) => {
         pProps["議案"] || pProps["名前"] || pProps["タイトル"];
       proposalTitle = extractText(pTitleProp) || "";
 
-      // 提出者 or 作成者 or 担当者（施行）
       const authorProp =
         pProps["提出者"] ||
         pProps["作成者"] ||
@@ -476,7 +532,6 @@ module.exports = async (req, res) => {
         authorName = p.name || "";
       }
 
-      // 内容（説明） or 内容 or 説明
       const descProp =
         pProps["内容（説明）"] ||
         pProps["内容"] ||
@@ -484,28 +539,51 @@ module.exports = async (req, res) => {
 
       description = extractText(descProp) || "";
 
-      // 添付資料（複数対応）
       attachments = extractAttachments(pProps);
     }
 
     if (req.method === "GET") {
-      const msg = alreadyResult
-        ? ""
-        : "議案の内容を確認し、承認または否認を選択して送信してください。";
-
-      const html = renderHtml({
-        ticketTitle,
-        proposalTitle,
-        authorName,
-        description,
-        attachments,
-        alreadyResult,
-        showForm: !alreadyResult,
-        pageId,
-        message: msg,
-      });
-      res.setHeader("Content-Type", "text/html; charset=utf-8");
-      return res.status(200).end(html);
+      if (alreadyResult) {
+        // すでに承認済みのとき：結果とコメントのみ表示（内容・添付は非表示）
+        const html = renderHtml({
+          ticketTitle,
+          proposalTitle,
+          authorName,
+          description,
+          attachments,
+          alreadyResult,
+          showForm: false,
+          pageId,
+          message: "",
+          defaultDecision: "approve",
+          resultName: alreadyResult,
+          commentText: storedComment,
+          approvalDateStr,
+        });
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        return res.status(200).end(html);
+      } else {
+        // 初回表示：詳細とフォームを表示
+        const msg =
+          "議案の内容を確認し、承認または否認を選択して送信してください。";
+        const html = renderHtml({
+          ticketTitle,
+          proposalTitle,
+          authorName,
+          description,
+          attachments,
+          alreadyResult: null,
+          showForm: true,
+          pageId,
+          message: msg,
+          defaultDecision: "approve",
+          resultName: null,
+          commentText: "",
+          approvalDateStr: "",
+        });
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        return res.status(200).end(html);
+      }
     }
 
     if (req.method === "POST") {
@@ -521,6 +599,10 @@ module.exports = async (req, res) => {
           showForm: false,
           pageId,
           message: "",
+          defaultDecision: "approve",
+          resultName: alreadyResult,
+          commentText: storedComment,
+          approvalDateStr,
         });
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         return res.status(200).end(html);
@@ -529,6 +611,28 @@ module.exports = async (req, res) => {
       const form = await parseFormBody(req);
       const decision = form.decision === "deny" ? "deny" : "approve";
       const comment = form.comment || "";
+      const trimmedComment = comment.trim();
+
+      // 否認の場合はコメント必須
+      if (decision === "deny" && !trimmedComment) {
+        const html = renderHtml({
+          ticketTitle,
+          proposalTitle,
+          authorName,
+          description,
+          attachments,
+          alreadyResult: null,
+          showForm: true,
+          pageId,
+          message: "否認を選択した場合はコメント（理由）の入力が必須です。",
+          defaultDecision: "deny",
+          resultName: null,
+          commentText: "",
+          approvalDateStr: "",
+        });
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        return res.status(200).end(html);
+      }
 
       const now = new Date().toISOString();
       const resultName = decision === "deny" ? "否認" : "承認";
@@ -542,10 +646,10 @@ module.exports = async (req, res) => {
             date: { start: now },
           },
           コメント: {
-            rich_text: comment
+            rich_text: trimmedComment
               ? [
                   {
-                    text: { content: comment },
+                    text: { content: trimmedComment },
                   },
                 ]
               : [],
@@ -586,6 +690,10 @@ module.exports = async (req, res) => {
         showForm: false,
         pageId,
         message: doneMsg,
+        defaultDecision: "approve",
+        resultName,
+        commentText: trimmedComment,
+        approvalDateStr: formatDateTime(now),
       });
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       return res.status(200).end(html);
