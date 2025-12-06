@@ -65,7 +65,8 @@ function renderHtml({
     : "";
 
   const descHtml = description
-    ? `<div style="white-space: pre-wrap; margin-top: 4px;">${description}</div>`
+    ? `<div class="section-title">内容（説明）</div>
+       <div style="white-space: pre-wrap; margin-top: 4px;">${description}</div>`
     : "";
 
   const attachHtml = attachmentUrl
@@ -75,12 +76,14 @@ function renderHtml({
        </div>`
     : "";
 
-  const statusHtml = alreadyResult
-    ? `<div style="margin: 12px 0; color: #c62828;">
-         この承認票はすでに「${alreadyResult}」として登録されています。<br>
-         送信内容の変更や再回答はできません。必要な場合は事務局までご連絡ください。
-       </div>`
-    : "";
+  // ★ 初回（message があるとき）は赤い「すでに承認済み」メッセージを出さない
+  const statusHtml =
+    alreadyResult && !safeMessage
+      ? `<div style="margin: 12px 0; color: #c62828;">
+           この承認票はすでに「${alreadyResult}」として登録されています。<br>
+           送信内容の変更や再回答はできません。必要な場合は事務局までご連絡ください。
+         </div>`
+      : "";
 
   const formHtml = showForm
     ? `<form method="POST" action="/api/sendApprovalGet?pageId=${pageId}">
