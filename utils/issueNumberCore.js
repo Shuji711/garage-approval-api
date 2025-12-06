@@ -1,12 +1,11 @@
 // /utils/issueNumberCore.js
-// 議案DBの「連番」を自動採番するコアロジック（送信時採番＋フォールバック対応版）
+// 議案DBの「連番」を自動採番するコアロジック（送信時採番＋フォールバック強化版）
 //
-// 同じ「作成月」「承認対象」「区分コード」の中で最大連番+1 を採番する。
-// - 作成月      : 作成日時（Created time）から算出
-// - 承認対象    : セレクト（理事会／正会員 など）
-// - 区分コード  :
-//      1) 区分コード プロパティ（Formula / Rollup / rich_text 等）
-//      2) それが空なら「区分」セレクト名をそのまま使う
+// 同じ「作成月」「承認対象」「区分キー」の中で最大連番+1 を採番する。
+// 「区分キー」は以下の優先順位で決定する：
+//   1) 区分コード プロパティ（Formula / Rollup / rich_text 等）
+//   2) 区分 セレクト名（もしあれば）
+//   3) 区分 リレーションの先頭ページID
 //
 // 前提：環境変数
 //   NOTION_API_KEY
@@ -15,7 +14,7 @@
 // 注意：
 //   - すでに「連番」が入っている場合は何もしない（その値を返して終了）
 //   - 承認対象が未設定のときは Error
-//   - 区分も何も入っていないときだけ Error（区分未選択）
+//   - 区分リレーションすら無いときだけ Error（完全に区分未設定）
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_GIAN_DATABASE_ID = process.env.NOTION_GIAN_DATABASE_ID;
@@ -50,7 +49,7 @@ async function fetchPage(pageId) {
 /**
  * いろいろな形のプロパティから文字列を取り出すヘルパー
  * - Formula (string/number)
- * - Rollup (array -> rich_text)
+ * - Rollup (array/number/date など)
  * - rich_text
  * - title
  * - plain_text
@@ -69,13 +68,44 @@ function extractTextLike(prop) {
     }
   }
 
-  // 2) Rollup (array -> rich_text)
-  if (prop.rollup?.type === "array") {
-    const arr = prop.rollup.array || [];
-    const first = arr[0];
-    if (first && first.type === "rich_text") {
-      const rt = first.rich_text || [];
-      return rt.map((r) => r.plain_text || "").join("").trim();
+  // 2) Rollup
+  if (prop.rollup) {
+    const r = prop.rollup;
+
+    // 2-1) array タイプ（show original など）
+    if (Array.isArray(r.array) && r.array.length > 0) {
+      const first = r.array[0];
+
+      // property_item.kind 系のパターンも含めて、よくある型を総当たりで見る
+      if (Array.isArray(first.rich_text)) {
+        return first.rich_text
+          .map((t) => t.plain_text || "")
+          .join("")
+          .trim();
+      }
+      if (Array.isArray(first.title)) {
+        return first.title.map((t) => t.plain_text || "").join("").trim();
+      }
+      if (typeof first.plain_text === "string") {
+        return first.plain_text.trim();
+      }
+      // 万一 type フィールドがあり、その配列を持つ場合も拾う
+      if (first.type && Array.isArray(first[first.type])) {
+        return first[first.type]
+          .map((t) => t.plain_text || "")
+          .join("")
+          .trim();
+      }
+    }
+
+    // 2-2) number rollup
+    if (typeof r.number === "number") {
+      return String(r.number);
+    }
+
+    // 2-3) date rollup
+    if (r.date && typeof r.date.start === "string") {
+      return r.date.start;
     }
   }
 
@@ -98,24 +128,31 @@ function extractTextLike(prop) {
 }
 
 /**
- * 区分コードを取得する：
+ * 区分キーを決定する：
  *   1) 区分コード プロパティからテキスト取得
- *   2) それが空なら 区分 セレクト名 を使う
+ *   2) それが空なら 区分 セレクト名（あれば）
+ *   3) それでも空なら 区分 リレーション先頭ページID
  */
-function getKubunCode(props) {
-  // 1) 区分コード プロパティ
+function getKubunKey(props) {
+  // 1) 区分コード プロパティ（Formula / Rollup など）
   if (props["区分コード"]) {
     const fromCode = extractTextLike(props["区分コード"]);
     if (fromCode) return fromCode;
   }
 
-  // 2) 区分 セレクト名
+  // 2) 区分 セレクト名（もしセレクト型が使われていれば）
   const kubunSelect = props["区分"]?.select?.name ?? "";
   if (kubunSelect && kubunSelect.trim().length > 0) {
     return kubunSelect.trim();
   }
 
-  // どちらも空なら本当に区分未設定
+  // 3) 区分 リレーション（区分マスタDB） → ページID をそのままキーにする
+  const rel = props["区分"]?.relation;
+  if (Array.isArray(rel) && rel.length > 0 && rel[0].id) {
+    return rel[0].id; // ページIDは Notion 内で一意なので、区分キーとして十分
+  }
+
+  // どれも取れない = 区分未設定
   return "";
 }
 
@@ -187,8 +224,7 @@ async function updateSequence(pageId, seq) {
  * - すでに入っていれば、その値をそのまま返す
  *
  * 採番条件：
- *   同じ「作成月」「承認対象」「区分コード」の中で最大連番+1
- *   （区分コードが空なら「区分」セレクト名を使用）
+ *   同じ「作成月」「承認対象」「区分キー」の中で最大連番+1
  */
 export async function ensureIssueSequence(proposalPageId) {
   // 1. 対象議案ページを取得
@@ -227,10 +263,10 @@ export async function ensureIssueSequence(proposalPageId) {
     throw new Error("承認対象が未設定です。");
   }
 
-  // 区分コード（なければ区分名）
-  const kubunCode = getKubunCode(props);
-  if (!kubunCode) {
-    throw new Error("区分または区分コードが未設定です。");
+  // 区分キー（区分コード or 区分名 or 区分リレーションID）
+  const kubunKey = getKubunKey(props);
+  if (!kubunKey) {
+    throw new Error("区分が未設定です。");
   }
 
   // 2. 同じ月＋承認対象の既存議案を取得
@@ -240,14 +276,14 @@ export async function ensureIssueSequence(proposalPageId) {
     approvalTarget,
   });
 
-  // 3. その中から「区分コードも同じ」ものだけを対象にして最大連番を探す
+  // 3. その中から「区分キーも同じ」ものだけを対象にして最大連番を探す
   let maxSeq = 0;
   for (const item of existing) {
     if (item.id === proposalPageId) continue;
 
     const p = item.properties || {};
-    const itemKubunCode = getKubunCode(p);
-    if (itemKubunCode !== kubunCode) continue;
+    const itemKubunKey = getKubunKey(p);
+    if (itemKubunKey !== kubunKey) continue;
 
     const seq = p["連番"]?.number ?? 0;
     if (typeof seq === "number" && seq > maxSeq) {
