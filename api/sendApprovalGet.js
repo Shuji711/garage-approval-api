@@ -36,20 +36,15 @@ async function updateProposalStatus(proposalId) {
 
   let statusToSet = null;
 
-  // みなし決議優先
   if (minashi === "成立") {
     statusToSet = "可決";
   } else if (minashi === "不成立") {
     statusToSet = "否決";
   } else {
     const majority = Math.floor(directorCount / 2) + 1;
-
-    // 可決条件：承認数が過半数以上
     if (approveCount >= majority) {
       statusToSet = "可決";
     }
-
-    // 否決条件（ざっくり）：承認が過半数未満 かつ 反対が多数
     if (!statusToSet && approveCount < majority && denyCount >= directorCount - approveCount) {
       statusToSet = "否決";
     }
@@ -216,16 +211,13 @@ async function getTicketAndProposal(ticketId) {
   const ticketPage = await notionFetch(`pages/${ticketId}`);
   const tProps = ticketPage.properties || {};
 
-  // 承認結果 / 承認日時 / コメント
   const resultSelect = tProps["承認結果"]?.select?.name || "";
   const approvedAt = tProps["承認日時"]?.date?.start || "";
   const commentProp =
     tProps["コメント"]?.rich_text?.[0]?.plain_text ||
-    tProps["コメント（表示用）」]?.rich_text?.[0]?.plain_text || // タイプミス対策
     tProps["コメント（表示用)"]?.rich_text?.[0]?.plain_text ||
     "";
 
-  // 議案リレーション
   const proposalRel = tProps["議案"]?.relation || [];
   const proposalId = proposalRel[0]?.id;
 
@@ -251,15 +243,14 @@ async function getTicketAndProposal(ticketId) {
       pProps["作成者"]?.people?.[0]?.name ||
       "";
 
-    const descRich =
-      pProps["内容（説明）」]?.rich_text || pProps["内容（説明)"]?.rich_text;
+    const descRich = pProps["内容（説明）"]?.rich_text;
     const desc =
-      (Array.isArray(descRich) ? descRich.map((r) => r.plain_text).join("") : "") ||
-      pProps["内容（説明）」]?.rich_text?.[0]?.plain_text ||
-      pProps["内容（説明)"]?.rich_text?.[0]?.plain_text ||
+      (Array.isArray(descRich)
+        ? descRich.map((r) => r.plain_text).join("")
+        : "") ||
+      pProps["内容（説明）"]?.rich_text?.[0]?.plain_text ||
       "";
 
-    // 添付URL群（添付URL / 添付URL1〜5）
     const attachDefs = [
       { urlKey: "添付URL", labelKey: "添付資料名" },
       { urlKey: "添付URL1", labelKey: "添付資料名1" },
@@ -327,11 +318,9 @@ export default async function handler(req, res) {
     const ticketId = id;
 
     if (req.method === "GET") {
-      // GET: フォーム or 結果表示
       const { resultSelect, approvedAt, comment, proposal } =
         await getTicketAndProposal(ticketId);
 
-      // すでに承認結果がある場合はフォームを出さず結果のみ表示
       if (resultSelect === "承認" || resultSelect === "否認") {
         const html = renderResultPage({
           result: resultSelect,
@@ -343,7 +332,6 @@ export default async function handler(req, res) {
         return;
       }
 
-      // 未回答 → フォーム表示
       const html = renderFormPage({ ticketId, proposal, errorMessage: "" });
       res.status(200).setHeader("Content-Type", "text/html; charset=utf-8");
       res.send(html);
@@ -355,7 +343,6 @@ export default async function handler(req, res) {
       const decision = form.decision;
       const commentInput = form.comment || "";
 
-      // 再度チェック：すでに回答済みならロック画面
       {
         const { resultSelect, approvedAt, comment, proposal } =
           await getTicketAndProposal(ticketId);
@@ -372,7 +359,6 @@ export default async function handler(req, res) {
           return;
         }
 
-        // decision 未選択
         if (!decision || (decision !== "approve" && decision !== "deny")) {
           const html = renderFormPage({
             ticketId,
@@ -386,7 +372,6 @@ export default async function handler(req, res) {
           return;
         }
 
-        // 否認時コメント必須
         if (decision === "deny" && !commentInput.trim()) {
           const html = renderFormPage({
             ticketId,
@@ -402,11 +387,9 @@ export default async function handler(req, res) {
         }
       }
 
-      // ここまで来たら回答を反映
       const now = new Date().toISOString();
       const resultName = decision === "approve" ? "承認" : "否認";
 
-      // チケット更新（承認結果／承認日時／コメント）
       const updateBody = {
         properties: {
           承認結果: { select: { name: resultName } },
@@ -418,7 +401,7 @@ export default async function handler(req, res) {
         updateBody.properties["コメント"] = {
           rich_text: [{ type: "text", text: { content: commentInput } }],
         };
-        updateBody.properties["コメント（表示用）"] = {
+        updateBody.properties["コメント（表示用)"] = {
           rich_text: [{ type: "text", text: { content: commentInput } }],
         };
       }
@@ -428,7 +411,6 @@ export default async function handler(req, res) {
         body: JSON.stringify(updateBody),
       });
 
-      // 再取得して結果画面用に整形 ＋ 議案ステータス自動更新
       const { resultSelect, approvedAt, comment, proposal } =
         await getTicketAndProposal(ticketId);
 
@@ -446,7 +428,6 @@ export default async function handler(req, res) {
       return;
     }
 
-    // その他メソッド
     res.status(405).send("Method Not Allowed");
   } catch (e) {
     console.error("sendApprovalGet error:", e);
