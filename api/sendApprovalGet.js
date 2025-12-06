@@ -310,12 +310,14 @@ async function parsePostBody(req) {
 
 export default async function handler(req, res) {
   try {
-    const { id } = req.query;
-    if (!id) {
+    // id と pageId の両方を受け付ける
+    const { id, pageId } = req.query;
+    const ticketId = id || pageId;
+
+    if (!ticketId) {
       res.status(400).send("Missing id");
       return;
     }
-    const ticketId = id;
 
     if (req.method === "GET") {
       const { resultSelect, approvedAt, comment, proposal } =
