@@ -1,27 +1,26 @@
 // /api/createApprovalTickets.js
-// 議案DBの「送信用URL」から呼び出され、承認票DBに承認票ページを生成するAPI
-// 環境変数：NOTION_API_KEY, NOTION_APPROVAL_DB_ID, NOTION_MEMBER_DB_ID
+// 議案ページ(pageId)から承認票をまとめて作成するAPI
+// - GET /api/createApprovalTickets?pageId=xxxxx
+//  1. 議案ページを取得
+//  2. 承認対象の会員リストを取得（Relation想定）
+//  3. 会員ごとに 承認票DB にページを作成
+//  4. 承認票に 送信URL / approveURL / denyURL / LINEユーザーID文字列 を設定
+//  5. 作成結果をJSONで返す
+//
+// 前提：環境変数に以下を設定しておくこと
+// - NOTION_API_KEY
+// - NOTION_TICKET_DB_ID  …… 承認票DBの database_id
+//
+// 会員DBや議案DBのIDはここでは使わず、
+// 「議案」Relation や 会員Relation から辿る前提にしている。
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
-const APPROVAL_DB_ID = process.env.NOTION_APPROVAL_DB_ID;
-const MEMBER_DB_ID = process.env.NOTION_MEMBER_DB_ID;
+const NOTION_TICKET_DB_ID = process.env.NOTION_TICKET_DB_ID;
 
-/**
- * 会員DBのプロパティ定義
- * ※ Notion の実プロパティ名に合わせてある
- */
-const MEMBER_PROP_NAME = "氏名"; // 氏名（タイトル）でもOK。実際は「氏名」列だが、タイトルを優先的に拾う
-const MEMBER_PROP_LINE_ID = "LINEユーザーID";
-const MEMBER_PROP_IS_BOARD = "理事";                // チェックボックス
-const MEMBER_PROP_IS_MEMBER = "正会員";            // チェックボックス
-const MEMBER_PROP_STATUS = "承認システム利用ステータス"; // セレクト
-const MEMBER_STATUS_ACTIVE = "本番";
-const MEMBER_PROP_LINE_ENABLED = "LINE承認有効";   // チェックボックス
+// あなたの本番ドメインに合わせて変更
+const BASE_URL = "https://approval.garagetsuno.org";
 
-/**
- * Notion 共通ヘッダ
- */
 function notionHeaders() {
   return {
     Authorization: `Bearer ${NOTION_API_KEY}`,
@@ -30,46 +29,33 @@ function notionHeaders() {
   };
 }
 
-/**
- * ページ取得（議案／会員／承認票 共通）
- */
-async function getPage(pageId) {
+async function notionGetPage(pageId) {
   const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: "GET",
     headers: notionHeaders(),
   });
-
   const text = await res.text();
   if (!res.ok) {
     console.error("Notion getPage error:", text);
-    throw new Error(`Failed to fetch Notion page: ${text}`);
+    throw new Error("Notion ページの取得に失敗しました。");
   }
-
   return JSON.parse(text);
 }
 
-/**
- * データベースクエリ（会員DB用）
- */
-async function queryDatabase(databaseId, body) {
-  const res = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
+async function notionCreatePage(body) {
+  const res = await fetch("https://api.notion.com/v1/pages", {
     method: "POST",
     headers: notionHeaders(),
     body: JSON.stringify(body),
   });
-
   const text = await res.text();
   if (!res.ok) {
-    console.error("Notion queryDatabase error:", text);
-    throw new Error(`Failed to query Notion database: ${text}`);
+    console.error("Notion createPage error:", text);
+    throw new Error("承認票の作成に失敗しました。");
   }
-
   return JSON.parse(text);
 }
 
-/**
- * タイトル or リッチテキストからテキストを取り出すユーティリティ
- */
 function extractText(prop) {
   if (!prop) return "";
   if (Array.isArray(prop.title) && prop.title.length > 0) {
@@ -81,252 +67,219 @@ function extractText(prop) {
   return "";
 }
 
-/**
- * 承認対象に応じて会員DBのフィルタ条件を返す
- * - 議案DBの select プロパティ「承認対象」を想定
- */
-function buildMemberFilter(approvalTargetName) {
-  let roleFilter = null;
+// 会員ページから氏名とLINEユーザーIDを抜き出す
+function extractMemberInfo(memberPage) {
+  const props = memberPage.properties || {};
+  const nameProp = props["氏名"] || props["名前"] || props["フルネーム"];
+  const memberName = extractText(nameProp) || "";
 
-  if (approvalTargetName === "理事会") {
-    // 理事チェック済み
-    roleFilter = {
-      property: MEMBER_PROP_IS_BOARD,
-      checkbox: { equals: true },
-    };
-  } else if (approvalTargetName === "正会員" || approvalTargetName === "社員総会") {
-    // 正会員チェック済み
-    roleFilter = {
-      property: MEMBER_PROP_IS_MEMBER,
-      checkbox: { equals: true },
-    };
-  } else {
-    return null;
+  const lineProp =
+    props["LINEユーザーID"] ||
+    props["LINEユーザーID文字列"] ||
+    props["LINE ID"];
+
+  let lineUserId = "";
+  if (lineProp) {
+    if (lineProp.rich_text && Array.isArray(lineProp.rich_text)) {
+      lineUserId = extractText(lineProp);
+    } else if (lineProp.url) {
+      lineUserId = lineProp.url;
+    }
   }
 
-  const filters = [roleFilter];
-
-  // 承認システム利用ステータス = 本番
-  filters.push({
-    property: MEMBER_PROP_STATUS,
-    select: { equals: MEMBER_STATUS_ACTIVE },
-  });
-
-  // LINE承認有効 = true
-  filters.push({
-    property: MEMBER_PROP_LINE_ENABLED,
-    checkbox: { equals: true },
-  });
-
-  if (filters.length === 1) {
-    return filters[0];
-  }
-
-  return { and: filters };
+  return { memberName, lineUserId };
 }
 
-/**
- * createApprovalTickets メインハンドラ
- */
 module.exports = async (req, res) => {
-  if (req.method !== "GET") {
-    res.setHeader("Allow", "GET");
-    return res.status(405).json({ status: "error", message: "Method Not Allowed" });
-  }
-
-  const { pageId } = req.query;
+  const { pageId } = req.query; // 議案ページID（Notionの id() をハイフンなしで渡している想定）
 
   if (!pageId) {
-    return res
-      .status(400)
-      .json({ status: "error", message: "pageId が指定されていません" });
+    res.statusCode = 400;
+    return res.end("pageId が指定されていません。");
   }
 
-  if (!NOTION_API_KEY || !APPROVAL_DB_ID || !MEMBER_DB_ID) {
-    return res.status(500).json({
-      status: "error",
-      message:
-        "サーバー設定エラー：NOTION_API_KEY / NOTION_APPROVAL_DB_ID / NOTION_MEMBER_DB_ID を確認してください",
-    });
+  if (!NOTION_API_KEY || !NOTION_TICKET_DB_ID) {
+    res.statusCode = 500;
+    return res.end(
+      "サーバー設定エラー：NOTION_API_KEY または NOTION_TICKET_DB_ID が未設定です。"
+    );
   }
 
   try {
+    if (req.method !== "GET") {
+      res.setHeader("Allow", "GET");
+      res.statusCode = 405;
+      return res.end("Method Not Allowed");
+    }
+
     // 1. 議案ページを取得
-    const proposalPage = await getPage(pageId);
-    const props = proposalPage.properties || {};
+    const proposalPage = await notionGetPage(pageId);
+    const pProps = proposalPage.properties || {};
 
-    // 議案タイトル（なければ無題）
-    const titleProp = props["議案"] || props["名前"];
-    const proposalTitle = extractText(titleProp) || "無題議案";
+    // 議案タイトル
+    const pTitleProp =
+      pProps["議案"] || pProps["名前"] || pProps["タイトル"];
+    const proposalTitle = extractText(pTitleProp) || "議案";
 
-    // 2. 承認対象を取得（select）
-    const approvalTargetProp = props["承認対象"];
-    const approvalTargetName =
-      approvalTargetProp &&
-      approvalTargetProp.select &&
-      approvalTargetProp.select.name
-        ? approvalTargetProp.select.name
-        : null;
+    // 承認先（例：理事会・社員総会など） ※あれば返却JSONに入れるだけ
+    const targetProp =
+      pProps["承認対象"] ||
+      pProps["承認先"] ||
+      pProps["審議先"] ||
+      pProps["決裁区分"];
+    const approvalTarget =
+      targetProp && targetProp.select && targetProp.select.name
+        ? targetProp.select.name
+        : "";
 
-    if (!approvalTargetName) {
-      return res.status(400).json({
-        status: "error",
-        message: "承認対象 が設定されていません（議案DBの「承認対象」プロパティを確認してください）",
-      });
+    // 2. 対象会員Relation を取得
+    //   プロパティ名は環境に合わせて必要ならここを書き換える
+    const relMembersProp =
+      pProps["対象会員"] ||
+      pProps["承認対象会員"] ||
+      pProps["会員"] ||
+      pProps["宛先会員"];
+
+    if (
+      !relMembersProp ||
+      !Array.isArray(relMembersProp.relation) ||
+      relMembersProp.relation.length === 0
+    ) {
+      // 対象会員がゼロの場合もエラーではなくそのまま返す
+      const result = {
+        status: "ok",
+        proposalPageId: proposalPage.id.replace(/-/g, ""),
+        proposalTitle,
+        approvalTarget,
+        memberCount: 0,
+        createdCount: 0,
+        tickets: [],
+      };
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      return res.status(200).end(JSON.stringify(result));
     }
 
-    const memberFilter = buildMemberFilter(approvalTargetName);
-    if (!memberFilter) {
-      return res.status(400).json({
-        status: "error",
-        message: `承認対象「${approvalTargetName}」に対応する会員抽出条件が未定義です（createApprovalTickets.js の buildMemberFilter を修正してください）`,
-      });
-    }
+    const memberRelations = relMembersProp.relation;
+    const tickets = [];
+    let createdCount = 0;
 
-    // 3. 会員DBから対象メンバーを取得
-    const memberQueryBody = {
-      page_size: 100,
-      filter: memberFilter,
-    };
+    // 3. 会員ごとに承認票を作成
+    for (const rel of memberRelations) {
+      const memberPageId = rel.id;
+      const memberPage = await notionGetPage(memberPageId);
+      const { memberName, lineUserId } = extractMemberInfo(memberPage);
 
-    const memberResult = await queryDatabase(MEMBER_DB_ID, memberQueryBody);
-    const memberPages = memberResult.results || [];
+      // 承認票タイトル
+      const ticketTitleText =
+        memberName && proposalTitle
+          ? `${proposalTitle}／${memberName} 様`
+          : proposalTitle || "承認票";
 
-    if (memberPages.length === 0) {
-      return res.status(400).json({
-        status: "error",
-        message: `承認対象「${approvalTargetName}」に該当する会員が見つかりません（会員DBを確認してください）`,
-      });
-    }
-
-    // 4. 既存承認票から「すでに承認票がある会員」を取得して重複作成を防ぐ
-    const ticketRelProp = props["承認票DB"]; // 議案DB → 承認票DB のリレーション
-    const ticketRelations = ticketRelProp && Array.isArray(ticketRelProp.relation)
-      ? ticketRelProp.relation
-      : [];
-
-    const existingMemberIds = new Set();
-
-    for (const ticket of ticketRelations) {
-      const ticketPage = await getPage(ticket.id);
-      const ticketProps = ticketPage.properties || {};
-      const memberProp = ticketProps["会員"];
-
-      if (memberProp && Array.isArray(memberProp.relation)) {
-        for (const rel of memberProp.relation) {
-          if (rel && rel.id) {
-            existingMemberIds.add(rel.id);
-          }
-        }
-      }
-    }
-
-    // 5. 対象メンバーごとに承認票を作成
-    const createdTickets = [];
-
-    for (const memberPage of memberPages) {
-      const memberPageId = memberPage.id;
-      if (!memberPageId) continue;
-
-      // すでに承認票がある会員はスキップ
-      if (existingMemberIds.has(memberPageId)) {
-        continue;
-      }
-
-      const memberProps = memberPage.properties || {};
-
-      const memberNameTitle =
-        memberProps["名前"] && memberProps["名前"].title
-          ? extractText(memberProps["名前"])
-          : "";
-      const memberNameProp =
-        memberProps[MEMBER_PROP_NAME] || memberProps["氏名"] || memberProps["会員名"];
-
-      const memberName =
-        memberNameTitle ||
-        extractText(memberNameProp) ||
-        "承認者";
-
-      const lineIdProp = memberProps[MEMBER_PROP_LINE_ID];
-      const lineUserId = extractText(lineIdProp); // 空でもOK
-
-      const ticketTitle = `${proposalTitle}／${memberName}`;
-
-      // 承認票DBにページを作成
-      const body = {
-        parent: { database_id: APPROVAL_DB_ID },
+      // 承認票ページ作成
+      const ticketBody = {
+        parent: {
+          database_id: NOTION_TICKET_DB_ID,
+        },
         properties: {
-          // 名前（タイトル）
-          "名前": {
+          // タイトル
+          名前: {
             title: [
               {
-                text: { content: ticketTitle },
+                text: { content: ticketTitleText },
               },
             ],
           },
-          // 議案（リレーション）
-          "議案": {
-            relation: [{ id: pageId }],
+          // 議案とのRelation
+          議案: {
+            relation: [
+              {
+                id: proposalPage.id,
+              },
+            ],
           },
-          // 会員（リレーション：会員DB）
-          "会員": {
-            relation: [{ id: memberPageId }],
+          // 会員とのRelation
+          会員: {
+            relation: [
+              {
+                id: memberPageId,
+              },
+            ],
           },
-          // LINEユーザーID
-          "LINEユーザーID": lineUserId
-            ? {
-                rich_text: [
+          // コメント（表示用）は空で初期化
+          "コメント（表示用）": {
+            rich_text: [],
+          },
+          // LINEユーザーID文字列（表示用）
+          "LINEユーザーID文字列": {
+            rich_text: lineUserId
+              ? [
                   {
                     text: { content: lineUserId },
                   },
-                ],
-              }
-            : {
-                rich_text: [],
-              },
-          // コメントは空で初期化
-          "コメント": {
-            rich_text: [],
+                ]
+              : [],
           },
         },
       };
 
-      const createRes = await fetch("https://api.notion.com/v1/pages", {
-        method: "POST",
-        headers: notionHeaders(),
-        body: JSON.stringify(body),
-      });
+      const ticketPage = await notionCreatePage(ticketBody);
+      createdCount += 1;
 
-      const createText = await createRes.text();
-      if (!createRes.ok) {
-        console.error("Notion create ticket error:", createText);
-        throw new Error(`承認票の作成に失敗しました: ${createText}`);
+      const ticketId = ticketPage.id; // ハイフン付き
+
+      // 4. 承認票に URL 系プロパティを追加更新
+      const urlBody = {
+        properties: {
+          送信URL: {
+            url: `${BASE_URL}/api/sendApproval?pageId=${ticketId}`,
+          },
+          approveURL: {
+            url: `${BASE_URL}/api/approve?id=${ticketId}`,
+          },
+          denyURL: {
+            url: `${BASE_URL}/api/deny?id=${ticketId}`,
+          },
+        },
+      };
+
+      const updateRes = await fetch(
+        `https://api.notion.com/v1/pages/${ticketId}`,
+        {
+          method: "PATCH",
+          headers: notionHeaders(),
+          body: JSON.stringify(urlBody),
+        }
+      );
+      const updateText = await updateRes.text();
+      if (!updateRes.ok) {
+        console.error("Notion update ticket URLs error:", updateText);
+        // URL更新に失敗しても致命的ではないので、チケット自体は結果に含める
       }
 
-      const ticketPage = JSON.parse(createText);
-
-      createdTickets.push({
-        ticketId: ticketPage.id,
+      tickets.push({
+        ticketId,
         memberPageId,
         memberName,
         lineUserId,
       });
     }
 
-    return res.status(200).json({
+    // 5. 結果JSONを返却
+    const result = {
       status: "ok",
-      proposalPageId: pageId,
+      proposalPageId: proposalPage.id.replace(/-/g, ""),
       proposalTitle,
-      approvalTarget: approvalTargetName,
-      memberCount: memberPages.length,
-      createdCount: createdTickets.length,
-      tickets: createdTickets,
-    });
+      approvalTarget,
+      memberCount: memberRelations.length,
+      createdCount,
+      tickets,
+    };
+
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    return res.status(200).end(JSON.stringify(result));
   } catch (err) {
     console.error("createApprovalTickets error:", err);
-    return res.status(500).json({
-      status: "error",
-      message: err.message || "internal server error",
-    });
+    res.statusCode = 500;
+    return res.end("承認票の作成中にエラーが発生しました。時間をおいて再度お試しください。");
   }
 };
