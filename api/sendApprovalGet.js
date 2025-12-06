@@ -98,21 +98,24 @@ function formatDateTime(iso) {
 
 // シンプルなHTMLレンダリング（モバイルファースト・Apple HIG寄せ）
 function renderHtml({
-  ticketTitle,
+  pageHeading,      // 上部見出し（承認依頼／承認内容確認／否認内容確認 など）
+  ticketTitle,      // 予備（未使用でもOK）
   proposalTitle,
   authorName,
   description,
-  attachments, // [{url, label}]
-  alreadyResult, // "承認" / "否認" / null
+  attachments,      // [{url, label}]
+  alreadyResult,    // "承認" / "否認" / null
   showForm,
   pageId,
   message,
-  defaultDecision, // "approve" | "deny"
-  resultName, // 完了画面用の結果表示 ("承認" / "否認")
-  commentText, // 完了画面用コメント
-  approvalDateStr, // 完了画面用日時文字列
+  defaultDecision,  // "approve" | "deny"
+  resultName,       // 完了画面用の結果表示 ("承認" / "否認")
+  commentText,      // 完了画面用コメント
+  approvalDateStr,  // 完了画面用日時文字列
 }) {
   const safeMessage = message || "";
+  const heading = pageHeading || ticketTitle || "承認フォーム";
+
   const infoLines = [];
 
   if (proposalTitle) {
@@ -246,7 +249,7 @@ function renderHtml({
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <title>${ticketTitle || "承認フォーム"}</title>
+  <title>${heading}</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     :root {
@@ -445,7 +448,7 @@ function renderHtml({
 </head>
 <body>
   <div class="box">
-    <h1>${ticketTitle || "承認フォーム"}</h1>
+    <h1>${heading}</h1>
     ${safeMessage ? `<div class="message">${safeMessage}</div>` : ""}
     <div class="info-card">
       <div class="info-header">議案情報</div>
@@ -497,7 +500,7 @@ module.exports = async (req, res) => {
     const ticketPage = await getPage(pageId);
     const tProps = ticketPage.properties || {};
 
-    // 承認票タイトル（議案名／氏名など）
+    // 承認票タイトル（議案名／氏名など）※今は見出しには使わない
     const tTitleProp = tProps["名前"] || tProps["タイトル"];
     const ticketTitle = extractText(tTitleProp) || "承認フォーム";
 
@@ -566,7 +569,15 @@ module.exports = async (req, res) => {
     if (req.method === "GET") {
       if (alreadyResult) {
         // すでに承認済みのとき：結果とコメントのみ表示（内容・添付は非表示）
+        const heading =
+          alreadyResult === "承認"
+            ? "承認内容確認"
+            : alreadyResult === "否認"
+            ? "否認内容確認"
+            : "回答内容確認";
+
         const html = renderHtml({
+          pageHeading: heading,
           ticketTitle,
           proposalTitle,
           authorName,
@@ -588,6 +599,7 @@ module.exports = async (req, res) => {
         const msg =
           "議案の内容を確認し、承認または否認を選択して送信してください。";
         const html = renderHtml({
+          pageHeading: "承認依頼",
           ticketTitle,
           proposalTitle,
           authorName,
@@ -610,7 +622,15 @@ module.exports = async (req, res) => {
     if (req.method === "POST") {
       // 2回目以降はロック
       if (alreadyResult) {
+        const heading =
+          alreadyResult === "承認"
+            ? "承認内容確認"
+            : alreadyResult === "否認"
+            ? "否認内容確認"
+            : "回答内容確認";
+
         const html = renderHtml({
+          pageHeading: heading,
           ticketTitle,
           proposalTitle,
           authorName,
@@ -637,6 +657,7 @@ module.exports = async (req, res) => {
       // 否認の場合はコメント必須
       if (decision === "deny" && !trimmedComment) {
         const html = renderHtml({
+          pageHeading: "承認依頼",
           ticketTitle,
           proposalTitle,
           authorName,
@@ -657,6 +678,12 @@ module.exports = async (req, res) => {
 
       const now = new Date().toISOString();
       const resultName = decision === "deny" ? "否認" : "承認";
+      const heading =
+        resultName === "承認"
+          ? "承認内容確認"
+          : resultName === "否認"
+          ? "否認内容確認"
+          : "回答内容確認";
 
       const body = {
         properties: {
@@ -702,6 +729,7 @@ module.exports = async (req, res) => {
           : "承認を受け付けました。ご回答ありがとうございます。";
 
       const html = renderHtml({
+        pageHeading: heading,
         ticketTitle,
         proposalTitle,
         authorName,
