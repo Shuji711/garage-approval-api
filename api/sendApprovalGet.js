@@ -47,9 +47,7 @@ function extractText(prop) {
 function extractAttachments(pProps) {
   const attachments = [];
 
-  const patterns = [
-    { urlKey: "添付URL", labelKey: "添付資料名" },
-  ];
+  const patterns = [{ urlKey: "添付URL", labelKey: "添付資料名" }];
   for (let i = 1; i <= 5; i++) {
     patterns.push({
       urlKey: `添付URL${i}`,
@@ -104,14 +102,14 @@ function renderHtml({
   proposalTitle,
   authorName,
   description,
-  attachments,     // [{url, label}]
-  alreadyResult,   // "承認" / "否認" / null
+  attachments, // [{url, label}]
+  alreadyResult, // "承認" / "否認" / null
   showForm,
   pageId,
   message,
   defaultDecision, // "approve" | "deny"
-  resultName,      // 完了画面用の結果表示 ("承認" / "否認")
-  commentText,     // 完了画面用コメント
+  resultName, // 完了画面用の結果表示 ("承認" / "否認")
+  commentText, // 完了画面用コメント
   approvalDateStr, // 完了画面用日時文字列
 }) {
   const safeMessage = message || "";
@@ -163,19 +161,29 @@ function renderHtml({
       </div>`;
   }
 
-  // 完了後に表示する結果・コメント
+  // 完了後に表示する結果・日時・コメント
   let resultBlock = "";
   if (alreadyResult || resultName) {
     const rn = resultName || alreadyResult || "";
-    const ct = (commentText && commentText.trim()) ? commentText.trim() : "（コメントなし）";
+    const ct =
+      commentText && commentText.trim()
+        ? commentText.trim()
+        : "（コメントなし）";
     const dt = approvalDateStr || "";
     resultBlock = `
-      <div class="section">
-        <div class="section-title">結果</div>
-        <div class="section-body">
-          <div>結果：${rn || "—"}</div>
-          ${dt ? `<div>日時：${dt}</div>` : ""}
+      <div class="section result-section">
+        <div class="result-row">
+          <span class="result-label">結果</span>
+          <span class="result-value">${rn || "—"}</span>
         </div>
+        ${
+          dt
+            ? `<div class="result-row">
+                 <span class="result-label">日時</span>
+                 <span class="result-value">${dt}</span>
+               </div>`
+            : ""
+        }
       </div>
       <div class="section">
         <div class="section-title">コメント</div>
@@ -277,7 +285,7 @@ function renderHtml({
       font-weight: 600;
     }
     .message {
-      margin-bottom: 12px;
+      margin-bottom: 10px;
       font-size: 14px;
       color: var(--danger);
     }
@@ -285,7 +293,7 @@ function renderHtml({
       border-radius: 12px;
       border: 1px solid var(--border-subtle);
       padding: 12px 14px;
-      margin-bottom: 16px;
+      margin-bottom: 12px;
       background: #fafafa;
     }
     .info-header {
@@ -297,7 +305,7 @@ function renderHtml({
       display: flex;
       flex-wrap: wrap;
       font-size: 14px;
-      margin-bottom: 4px;
+      margin-bottom: 3px;
     }
     .info-block .label {
       min-width: 72px;
@@ -308,12 +316,12 @@ function renderHtml({
       font-weight: 500;
     }
     .section {
-      margin-top: 10px;
+      margin-top: 8px;
     }
     .section-title {
       font-size: 13px;
       font-weight: 600;
-      margin-bottom: 4px;
+      margin-bottom: 3px;
       color: var(--text-sub);
     }
     .section-body {
@@ -326,46 +334,63 @@ function renderHtml({
       margin: 4px 0 0;
     }
     .attach-item + .attach-item {
-      margin-top: 6px;
+      margin-top: 4px;
     }
     .attach-link {
       display: inline-block;
       font-size: 14px;
       text-decoration: none;
       color: var(--accent);
-      padding: 6px 10px;
+      padding: 5px 9px;
       border-radius: 999px;
       border: 1px solid rgba(0,122,255,0.3);
       background: rgba(0,122,255,0.04);
     }
     .status {
       font-size: 13px;
-      margin: 12px 0;
+      margin: 10px 0 8px;
       border-radius: 10px;
-      padding: 10px 12px;
+      padding: 9px 11px;
     }
     .status-locked {
       background: #ffecec;
       color: var(--danger);
       border: 1px solid rgba(198,40,40,0.2);
     }
+    .result-section {
+      margin-top: 8px;
+    }
+    .result-row {
+      display: flex;
+      flex-wrap: wrap;
+      font-size: 14px;
+      margin-bottom: 3px;
+    }
+    .result-label {
+      min-width: 52px;
+      color: var(--text-sub);
+    }
+    .result-value {
+      flex: 1;
+      font-weight: 500;
+    }
     .field-group {
       border: none;
-      margin: 14px 0 8px;
+      margin: 12px 0 6px;
       padding: 0;
     }
     .field-title {
       display: block;
       font-size: 14px;
       font-weight: 600;
-      margin-bottom: 6px;
+      margin-bottom: 4px;
     }
     .radio-row {
       display: flex;
       align-items: center;
       gap: 6px;
       font-size: 15px;
-      padding: 8px 0;
+      padding: 6px 0;
     }
     .radio-row input[type="radio"] {
       width: 18px;
@@ -383,15 +408,15 @@ function renderHtml({
     .note {
       font-size: 12px;
       color: var(--text-sub);
-      margin-top: 6px;
+      margin-top: 4px;
     }
     .actions {
-      margin-top: 16px;
+      margin-top: 14px;
       display: flex;
       justify-content: flex-end;
     }
     .primary-button {
-      padding: 10px 20px;
+      padding: 9px 18px;
       border-radius: var(--radius-button);
       border: none;
       cursor: pointer;
@@ -413,7 +438,7 @@ function renderHtml({
         justify-content: center;
       }
       .actions {
-        margin-top: 14px;
+        margin-top: 12px;
       }
     }
   </style>
@@ -421,11 +446,7 @@ function renderHtml({
 <body>
   <div class="box">
     <h1>${ticketTitle || "承認フォーム"}</h1>
-    ${
-      safeMessage
-        ? `<div class="message">${safeMessage}</div>`
-        : ""
-    }
+    ${safeMessage ? `<div class="message">${safeMessage}</div>` : ""}
     <div class="info-card">
       <div class="info-header">議案情報</div>
       ${infoHtml}
