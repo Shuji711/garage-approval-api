@@ -1,7 +1,7 @@
 // /api/sendApprovalGet.js
 // LINE から遷移するブラウザ承認フォーム
 // ・GET: フォーム表示 or 結果表示（1回ロック）
-// ・POST: 承認/否認 + コメント保存 + 議案DB「状況」を自動更新
+// ・POST: 承認/否認 + コメント保存（議案DBの状況は触らない）
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
@@ -22,46 +22,6 @@ async function notionFetch(path, options = {}) {
     throw new Error(`Notion API error ${res.status}: ${text}`);
   }
   return JSON.parse(text);
-}
-
-// --- 議案ステータス自動更新（approve.js / deny.js と同等ロジック） ----
-async function updateProposalStatus(proposalId) {
-  const proposalPage = await notionFetch(`pages/${proposalId}`);
-  const props = proposalPage.properties || {};
-
-  const approveCount = props["理事承認数"]?.rollup?.number ?? 0;
-  const directorCount = props["理事数"]?.rollup?.number ?? 0;
-  const minashi = props["みなし決議"]?.formula?.string ?? "";
-  const denyCount = props["反対数"]?.number ?? 0;
-
-  let statusToSet = null;
-
-  if (minashi === "成立") {
-    statusToSet = "可決";
-  } else if (minashi === "不成立") {
-    statusToSet = "否決";
-  } else {
-    const majority = Math.floor(directorCount / 2) + 1;
-    if (approveCount >= majority) {
-      statusToSet = "可決";
-    }
-    if (!statusToSet && approveCount < majority && denyCount >= directorCount - approveCount) {
-      statusToSet = "否決";
-    }
-  }
-
-  if (!statusToSet) return;
-
-  await notionFetch(`pages/${proposalId}`, {
-    method: "PATCH",
-    body: JSON.stringify({
-      properties: {
-        状況: {
-          select: { name: statusToSet },
-        },
-      },
-    }),
-  });
 }
 
 // --- HTML レンダリング系 -------------------------------------------------
@@ -121,7 +81,7 @@ function renderResultPage({ result, datetime, comment }) {
 `;
 }
 
-function renderFormPage({ ticketId, proposal, errorMessage }) {
+function renderFormPage({ proposal, errorMessage }) {
   const title = "承認依頼";
   const proposalTitle = proposal.title || "";
   const author = proposal.author || "";
@@ -331,7 +291,7 @@ export default async function handler(req, res) {
         return;
       }
 
-      const html = renderFormPage({ ticketId, proposal, errorMessage: "" });
+      const html = renderFormPage({ proposal, errorMessage: "" });
       res.status(200).setHeader("Content-Type", "text/html; charset=utf-8");
       res.send(html);
       return;
@@ -360,7 +320,6 @@ export default async function handler(req, res) {
 
         if (!decision || (decision !== "approve" && decision !== "deny")) {
           const html = renderFormPage({
-            ticketId,
             proposal,
             errorMessage: "承認か否認を選択してください。",
           });
@@ -373,7 +332,6 @@ export default async function handler(req, res) {
 
         if (decision === "deny" && !commentInput.trim()) {
           const html = renderFormPage({
-            ticketId,
             proposal,
             errorMessage:
               "否認を選択した場合はコメント（理由）の入力が必須です。",
@@ -407,12 +365,8 @@ export default async function handler(req, res) {
         body: JSON.stringify(updateBody),
       });
 
-      const { resultSelect, approvedAt, comment, proposal } =
+      const { resultSelect, approvedAt, comment } =
         await getTicketAndProposal(ticketId);
-
-      if (proposal.id) {
-        await updateProposalStatus(proposal.id);
-      }
 
       const html = renderResultPage({
         result: resultSelect || resultName,
