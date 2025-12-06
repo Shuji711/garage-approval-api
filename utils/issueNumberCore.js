@@ -1,5 +1,20 @@
 // /utils/issueNumberCore.js
-// 議案DBの「連番」を自動採番するコアロジック
+// 議案DBの「連番」を自動採番するコアロジック（送信時採番対応版）
+//
+// 同じ「作成月」「承認対象」「区分コード」の中で最大連番+1 を採番する。
+// - 作成月      : 作成日時（Created time）から算出
+// - 承認対象    : セレクト（理事会／正会員 など）
+// - 区分コード  : Formula / Rollup / rich_text など、複数パターンを許容して取得する
+//
+// 前提：環境変数
+//   NOTION_API_KEY
+//   NOTION_GIAN_DATABASE_ID … 議案DB ID
+//
+// 注意：
+//   - すでに「連番」が入っている場合は何もしない（その値を返して終了）
+//   - 区分コードや承認対象が取得できない場合は Error を投げる
+//   - 呼び出し側（createApprovalTickets など）で try-catch し、
+//     採番失敗しても承認票生成は継続できるようにしておく。
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_GIAN_DATABASE_ID = process.env.NOTION_GIAN_DATABASE_ID;
@@ -32,10 +47,64 @@ async function fetchPage(pageId) {
 }
 
 /**
+ * 区分コードを様々なプロパティ形態から取り出すヘルパー
+ * - Formula (string/number)
+ * - Rollup (array -> rich_text)
+ * - rich_text
+ * - title
+ * - plain_text
+ */
+function extractKubunCodeFromProp(prop) {
+  if (!prop) return "";
+
+  // 1) Formula プロパティ対応
+  if (prop.formula) {
+    const f = prop.formula;
+    if (typeof f.string === "string" && f.string.trim().length > 0) {
+      return f.string.trim();
+    }
+    if (typeof f.number === "number") {
+      return String(f.number);
+    }
+  }
+
+  // 2) Rollup (array -> rich_text)
+  if (prop.rollup?.type === "array") {
+    const arr = prop.rollup.array || [];
+    const first = arr[0];
+    if (first && first.type === "rich_text") {
+      const rt = first.rich_text || [];
+      return rt.map((r) => r.plain_text || "").join("").trim();
+    }
+  }
+
+  // 3) rich_text 直接
+  if (Array.isArray(prop.rich_text)) {
+    return prop.rich_text.map((r) => r.plain_text || "").join("").trim();
+  }
+
+  // 4) title 直接
+  if (Array.isArray(prop.title)) {
+    return prop.title.map((t) => t.plain_text || "").join("").trim();
+  }
+
+  // 5) plain_text フィールド
+  if (typeof prop.plain_text === "string") {
+    return prop.plain_text.trim();
+  }
+
+  return "";
+}
+
+/**
  * 対象月＋承認対象が同じ既存議案を取得
  * created_time 範囲（start <= created_time < end）と 承認対象 で絞り込む
  */
 async function queryExistingIssues({ monthStartISO, monthEndISO, approvalTarget }) {
+  if (!NOTION_GIAN_DATABASE_ID) {
+    throw new Error("NOTION_GIAN_DATABASE_ID が未設定です。");
+  }
+
   const body = {
     filter: {
       and: [
@@ -116,7 +185,7 @@ export async function ensureIssueSequence(proposalPageId) {
   if (!createdISO) {
     throw new Error("作成日時が取得できませんでした。");
   }
-  const createdDate = new Date(createdISO); // ここではそのまま使う（ローカルタイムの差は月単位なのでほぼ問題なし）
+  const createdDate = new Date(createdISO);
 
   const year = createdDate.getUTCFullYear();
   const month = createdDate.getUTCMonth(); // 0-11
@@ -134,19 +203,8 @@ export async function ensureIssueSequence(proposalPageId) {
     throw new Error("承認対象が未設定です。");
   }
 
-  // 区分コード（Rollup → テキスト化）
-  let kubunCode = "";
-  const kubunRollup = props["区分コード"];
-  if (kubunRollup?.rollup?.type === "array") {
-    const arr = kubunRollup.rollup.array || [];
-    const first = arr[0];
-    if (first && first.type === "rich_text") {
-      kubunCode = first.rich_text.plain_text || "";
-    }
-  } else if (typeof kubunRollup?.plain_text === "string") {
-    kubunCode = kubunRollup.plain_text;
-  }
-
+  // 区分コード（Formula / Rollup / rich_text などから取得）
+  const kubunCode = extractKubunCodeFromProp(props["区分コード"]);
   if (!kubunCode) {
     throw new Error("区分コードが取得できませんでした。");
   }
@@ -165,19 +223,7 @@ export async function ensureIssueSequence(proposalPageId) {
 
     const p = item.properties || {};
 
-    // 区分コード比較
-    let itemKubunCode = "";
-    const kc = p["区分コード"];
-    if (kc?.rollup?.type === "array") {
-      const arr = kc.rollup.array || [];
-      const first = arr[0];
-      if (first && first.type === "rich_text") {
-        itemKubunCode = first.rich_text.plain_text || "";
-      }
-    } else if (typeof kc?.plain_text === "string") {
-      itemKubunCode = kc.plain_text;
-    }
-
+    const itemKubunCode = extractKubunCodeFromProp(p["区分コード"]);
     if (itemKubunCode !== kubunCode) continue;
 
     const seq = p["連番"]?.number ?? 0;
