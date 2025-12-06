@@ -7,6 +7,7 @@
 //     - 理事会   : 理事 = true かつ 承認システム利用ステータス = "本番" かつ LINE承認有効 = true
 //     - 正会員   : 正会員 = true かつ 承認システム利用ステータス = "本番" かつ LINE承認有効 = true
 //  3. ピックした人数分、承認票DBに承認票ページを作成
+//     - ただし「同じ議案 × 同じ会員」の承認票が既に存在する場合はスキップ（1人1票を保証）
 //  4. 各承認票に 送信URL / approveURL / denyURL を書き込み
 //  5. 各承認票について sendApprovalMessage(pageId) を呼び出し、LINEに承認依頼を送信
 //
@@ -195,6 +196,31 @@ function buildMemberFilter(approvalTarget) {
   return null;
 }
 
+// すでに同じ議案 × 同じ会員の承認票が存在するか確認
+async function existsTicketForMember(proposalPageId, memberPageId) {
+  const result = await notionQueryDatabase(NOTION_APPROVAL_DB_ID, {
+    filter: {
+      and: [
+        {
+          property: "議案",
+          relation: {
+            contains: proposalPageId,
+          },
+        },
+        {
+          property: "会員",
+          relation: {
+            contains: memberPageId,
+          },
+        },
+      ],
+    },
+    page_size: 1,
+  });
+
+  return (result.results || []).length > 0;
+}
+
 module.exports = async (req, res) => {
   const { pageId } = req.query; // 議案ページID（ハイフン付き）
 
@@ -305,6 +331,20 @@ module.exports = async (req, res) => {
         continue;
       }
 
+      // 既に同じ議案 × 同じ会員の承認票が存在する場合は作成・送信しない
+      const alreadyExists = await existsTicketForMember(
+        proposalPage.id,
+        memberId
+      );
+      if (alreadyExists) {
+        skipped.push({
+          memberId,
+          memberName,
+          reason: "既存の承認票が存在するためスキップ",
+        });
+        continue;
+      }
+
       const ticketTitleText =
         memberName && proposalTitle
           ? `${proposalTitle}／${memberName}`
@@ -339,7 +379,8 @@ module.exports = async (req, res) => {
           "コメント（表示用）": {
             rich_text: [],
           },
-          "LINEユーザーID文字列": {
+          // 標準仕様：承認票DB側もプロパティ名は「LINEユーザーID」を使用
+          LINEユーザーID: {
             rich_text: [
               {
                 text: { content: lineUserId },
