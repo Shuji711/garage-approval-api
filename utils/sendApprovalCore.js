@@ -1,10 +1,12 @@
 // /utils/sendApprovalCore.js
-// 承認票ページIDを受け取り、その承認票に紐づく会員の LINE ユーザーID 宛てに
+// 承認票ページIDを受け取り、その承認票に紐づく会員DBの LINE ユーザーID 宛てに
 // 承認依頼メッセージを送信するモジュール。
 //
-// ・承認票DB側のプロパティ名は「LINEユーザーID」を使用（文字列型：リッチテキスト or URL を想定）
-// ・議案名などの表示情報は、承認票 -> 議案リレーションから取得
-// ・ボタン「内容を確認する」→ /api/sendApprovalGet?pageId=承認票ID に遷移
+// ・LINEユーザーIDの正本は「会員DB」側にある前提
+// ・承認票DBの「会員」リレーションを辿って会員ページを取得し、
+//   そちらの「LINEユーザーID」から送信先を決定する
+//
+// ボタン「内容を確認する」→ /api/sendApprovalGet?pageId=承認票ID に遷移
 //
 // 返り値：
 //   { ok: true, sentTo: [lineUserId] }
@@ -49,7 +51,18 @@ function extractText(prop) {
   return "";
 }
 
-// 承認票ページから LINEユーザーID／会員名／議案情報を取得
+function extractLineUserIdFromProp(prop) {
+  if (!prop) return "";
+  if (Array.isArray(prop.rich_text) && prop.rich_text.length > 0) {
+    return extractText(prop).trim();
+  }
+  if (prop.url) {
+    return (prop.url || "").trim();
+  }
+  return "";
+}
+
+// 承認票ページから、会員DBの LINEユーザーID／会員名／議案情報を取得
 async function extractTicketContext(ticketPageId) {
   const ticketPage = await notionGetPage(ticketPageId);
   const tProps = ticketPage.properties || {};
@@ -58,19 +71,12 @@ async function extractTicketContext(ticketPageId) {
   const tTitleProp = tProps["名前"] || tProps["タイトル"];
   const ticketTitle = extractText(tTitleProp) || "承認依頼";
 
-  // LINEユーザーID（承認票DB側のプロパティ名は「LINEユーザーID」）
-  const lineProp = tProps["LINEユーザーID"];
   let lineUserId = "";
-  if (lineProp) {
-    if (Array.isArray(lineProp.rich_text)) {
-      lineUserId = extractText(lineProp).trim();
-    } else if (lineProp.url) {
-      lineUserId = (lineProp.url || "").trim();
-    }
-  }
-
-  // 会員名（会員リレーションから取得／任意）
   let memberName = "";
+  let proposalTitle = "";
+  let description = "";
+
+  // 1) 会員リレーションから会員ページを取得し、そちらの LINEユーザーID を見る
   const memberRel = tProps["会員"];
   if (
     memberRel &&
@@ -81,18 +87,19 @@ async function extractTicketContext(ticketPageId) {
     try {
       const memberPage = await notionGetPage(memberId);
       const mProps = memberPage.properties || {};
+
       const mNameProp =
         mProps["氏名"] || mProps["名前"] || mProps["フルネーム"];
       memberName = extractText(mNameProp) || "";
+
+      const memberLineProp = mProps["LINEユーザーID"];
+      lineUserId = extractLineUserIdFromProp(memberLineProp);
     } catch (e) {
       console.warn("会員ページ取得に失敗しました（継続）:", e);
     }
   }
 
-  // 議案情報（タイトル・内容要約）
-  let proposalTitle = "";
-  let description = "";
-
+  // 2) 議案情報（タイトル・内容要約）は議案DBから取得
   const proposalRel = tProps["議案"];
   if (
     proposalRel &&
@@ -292,7 +299,7 @@ async function sendApprovalMessage(ticketPageId) {
     if (!lineUserId) {
       return {
         ok: false,
-        error: "LINEユーザーIDが承認票から取得できませんでした。",
+        error: "会員DBから LINEユーザーID を取得できませんでした。",
       };
     }
 
