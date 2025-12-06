@@ -212,16 +212,26 @@ module.exports = async (req, res) => {
       const pTitleProp = pProps["議案"] || pProps["名前"] || pProps["タイトル"];
       proposalTitle = extractText(pTitleProp) || "";
 
+      // 提出者 or 作成者 or 担当者（施行）
       const authorProp =
-        pProps["提出者"] || pProps["作成者"] || pProps["担当者（施行）」];
+        pProps["提出者"] ||
+        pProps["作成者"] ||
+        pProps["担当者（施行）"];
+
       if (authorProp && Array.isArray(authorProp.people) && authorProp.people.length > 0) {
         const p = authorProp.people[0];
         authorName = p.name || "";
       }
 
-      const descProp = pProps["内容（説明）」] || pProps["内容（説明)"] || pProps["内容（説明）」"] || pProps["内容（説明"];
+      // 内容（説明） or 内容 or 説明
+      const descProp =
+        pProps["内容（説明）"] ||
+        pProps["内容"] ||
+        pProps["説明"];
+
       description = extractText(descProp) || "";
 
+      // 添付URL or 添付URL1
       const attachProp = pProps["添付URL"] || pProps["添付URL1"];
       if (attachProp && attachProp.url) {
         attachmentUrl = attachProp.url;
