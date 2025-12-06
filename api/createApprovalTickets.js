@@ -2,6 +2,7 @@
 // 議案ページ(pageId)から承認票を作成し、対象会員にLINEで承認依頼を送信するAPI
 //
 // フロー：
+//  0. 対象議案の「連番」を ensureIssueSequence で自動採番（未設定の場合のみ）
 //  1. 議案ページの「承認対象」を見る（理事会 / 正会員）
 //  2. 会員DBから対象者を自動ピック
 //     - 理事会   : 理事 = true かつ 承認システム利用ステータス = "本番" かつ LINE承認有効 = true
@@ -16,6 +17,7 @@
 //   NOTION_MEMBER_DB_ID    … 会員DB
 //   NOTION_APPROVAL_DB_ID  … 承認票DB
 //   LINE_CHANNEL_ACCESS_TOKEN … sendApprovalCore.js 側で使用
+//   NOTION_GIAN_DATABASE_ID … 議案DB（issueNumberCore 用）
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
@@ -241,6 +243,18 @@ module.exports = async (req, res) => {
       res.setHeader("Allow", "GET");
       res.statusCode = 405;
       return res.end("Method Not Allowed");
+    }
+
+    // 0. 議案番号用「連番」を自動採番（未設定のときのみ）
+    //    issueNumberCore.js は ES Module export なので動的 import を使用
+    try {
+      const { ensureIssueSequence } = await import(
+        "../utils/issueNumberCore.js"
+      );
+      await ensureIssueSequence(pageId);
+    } catch (seqErr) {
+      console.error("ensureIssueSequence error (続行します):", seqErr);
+      // 採番に失敗しても承認票生成・送信は続行
     }
 
     // 1. 議案ページ取得
