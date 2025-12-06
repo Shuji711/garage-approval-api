@@ -1,761 +1,455 @@
 // /api/sendApprovalGet.js
-// LINE からの「内容を確認する」ボタン用。
-// 承認票ID(pageId)を受け取り、議案情報＋承認/否認フォームを表示。
-// 1度回答した承認票はロックし、2回目以降は「回答済み」と表示する。
-// 添付資料は最大5件まで表示し、あれば「添付資料名」プロパティをラベルとして利用する。
-// 否認の場合はコメント必須。完了画面には結果・日時・コメントのみ表示する。
+// LINE から遷移するブラウザ承認フォーム
+// ・GET: フォーム表示 or 結果表示（1回ロック）
+// ・POST: 承認/否認 + コメント保存 + 議案DB「状況」を自動更新
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
 
-function notionHeaders() {
-  return {
-    Authorization: `Bearer ${NOTION_API_KEY}`,
-    "Notion-Version": NOTION_VERSION,
-    "Content-Type": "application/json",
-  };
-}
-
-async function getPage(pageId) {
-  const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-    method: "GET",
-    headers: notionHeaders(),
+async function notionFetch(path, options = {}) {
+  const res = await fetch(`https://api.notion.com/v1/${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${NOTION_API_KEY}`,
+      "Notion-Version": NOTION_VERSION,
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
   });
+
   const text = await res.text();
   if (!res.ok) {
-    console.error("Notion getPage error:", text);
-    throw new Error("Notion ページの取得に失敗しました。");
+    throw new Error(`Notion API error ${res.status}: ${text}`);
   }
   return JSON.parse(text);
 }
 
-function extractText(prop) {
-  if (!prop) return "";
-  if (Array.isArray(prop.title) && prop.title.length > 0) {
-    return prop.title.map((t) => t.plain_text || "").join("");
-  }
-  if (Array.isArray(prop.rich_text) && prop.rich_text.length > 0) {
-    return prop.rich_text.map((t) => t.plain_text || "").join("");
-  }
-  return "";
-}
+// --- 議案ステータス自動更新（approve.js / deny.js と同等ロジック） ----
+async function updateProposalStatus(proposalId) {
+  const proposalPage = await notionFetch(`pages/${proposalId}`);
+  const props = proposalPage.properties || {};
 
-// 議案ページから添付資料一覧を取得
-// 想定プロパティ：
-//  - 添付URL / 添付URL1〜5   : URL or リッチテキスト
-//  - 添付資料名 / 添付資料名1〜5 : ラベル用（リッチテキスト）
-function extractAttachments(pProps) {
-  const attachments = [];
+  const approveCount = props["理事承認数"]?.rollup?.number ?? 0;
+  const directorCount = props["理事数"]?.rollup?.number ?? 0;
+  const minashi = props["みなし決議"]?.formula?.string ?? "";
+  const denyCount = props["反対数"]?.number ?? 0;
 
-  const patterns = [{ urlKey: "添付URL", labelKey: "添付資料名" }];
-  for (let i = 1; i <= 5; i++) {
-    patterns.push({
-      urlKey: `添付URL${i}`,
-      labelKey: `添付資料名${i}`,
-    });
-  }
+  let statusToSet = null;
 
-  for (let i = 0; i < patterns.length; i++) {
-    const { urlKey, labelKey } = patterns[i];
+  // みなし決議優先
+  if (minashi === "成立") {
+    statusToSet = "可決";
+  } else if (minashi === "不成立") {
+    statusToSet = "否決";
+  } else {
+    const majority = Math.floor(directorCount / 2) + 1;
 
-    const urlProp = pProps[urlKey];
-    if (!urlProp) continue;
-
-    let url = "";
-    if (urlProp.url) {
-      url = urlProp.url;
-    } else if (Array.isArray(urlProp.rich_text)) {
-      url = extractText(urlProp);
-    }
-    url = (url || "").trim();
-    if (!url) continue;
-
-    const labelProp = pProps[labelKey];
-    let label = labelProp ? extractText(labelProp).trim() : "";
-
-    if (!label) {
-      const index = attachments.length + 1;
-      label = attachments.length === 0 ? "添付資料を開く" : `添付資料${index}`;
+    // 可決条件：承認数が過半数以上
+    if (approveCount >= majority) {
+      statusToSet = "可決";
     }
 
-    attachments.push({ url, label });
+    // 否決条件（ざっくり）：承認が過半数未満 かつ 反対が多数
+    if (!statusToSet && approveCount < majority && denyCount >= directorCount - approveCount) {
+      statusToSet = "否決";
+    }
   }
 
-  return attachments;
+  if (!statusToSet) return;
+
+  await notionFetch(`pages/${proposalId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      properties: {
+        状況: {
+          select: { name: statusToSet },
+        },
+      },
+    }),
+  });
 }
 
-function formatDateTime(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  return `${y}-${m}-${day} ${hh}:${mm}`;
+// --- HTML レンダリング系 -------------------------------------------------
+
+function escapeHtml(str = "") {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
-// シンプルなHTMLレンダリング（モバイルファースト・Apple HIG寄せ）
-function renderHtml({
-  pageHeading,      // 上部見出し（承認依頼／承認内容確認／否認内容確認 など）
-  ticketTitle,      // 予備（未使用でもOK）
-  proposalTitle,
-  authorName,
-  description,
-  attachments,      // [{url, label}]
-  alreadyResult,    // "承認" / "否認" / null
-  showForm,
-  pageId,
-  message,
-  defaultDecision,  // "approve" | "deny"
-  resultName,       // 完了画面用の結果表示 ("承認" / "否認")
-  commentText,      // 完了画面用コメント
-  approvalDateStr,  // 完了画面用日時文字列
-}) {
-  const safeMessage = message || "";
-  const heading = pageHeading || ticketTitle || "承認フォーム";
+function renderResultPage({ result, datetime, comment }) {
+  const resultLabel =
+    result === "承認" ? "承認" : result === "否認" ? "否認" : "不明";
 
-  const infoLines = [];
+  const title =
+    result === "承認"
+      ? "承認内容確認"
+      : result === "否認"
+      ? "否認内容確認"
+      : "回答内容確認";
 
-  if (proposalTitle) {
-    infoLines.push(
-      `<div><span class="label">議案名</span><span class="value">${proposalTitle}</span></div>`
-    );
-  }
-  if (authorName) {
-    infoLines.push(
-      `<div><span class="label">作成者</span><span class="value">${authorName}</span></div>`
-    );
-  }
+  const commentText = comment?.trim()
+    ? escapeHtml(comment)
+    : "（コメントなし）";
 
-  const infoHtml = infoLines.length
-    ? `<div class="info-block">${infoLines.join("")}</div>`
-    : "";
+  const datetimeText = datetime || "（記録なし）";
 
-  // 詳細表示は「まだ回答していないときのみ」
-  const showDetails = !alreadyResult && showForm;
-
-  const descHtml =
-    showDetails && description
-      ? `<div class="section">
-           <div class="section-title">内容（説明）</div>
-           <div class="section-body">${description.replace(/\n/g, "<br>")}</div>
-         </div>`
-      : "";
-
-  let attachHtml = "";
-  if (showDetails && attachments && attachments.length > 0) {
-    const items = attachments
-      .map(
-        (att) =>
-          `<li class="attach-item">
-             <a href="${att.url}" target="_blank" rel="noopener noreferrer" class="attach-link">
-               ${att.label}
-             </a>
-           </li>`
-      )
-      .join("");
-    attachHtml = `<div class="section">
-        <div class="section-title">添付資料</div>
-        <ul class="attach-list">
-          ${items}
-        </ul>
-      </div>`;
-  }
-
-  // 完了後に表示する結果・日時・コメント
-  let resultBlock = "";
-  if (alreadyResult || resultName) {
-    const rn = resultName || alreadyResult || "";
-    const ct =
-      commentText && commentText.trim()
-        ? commentText.trim()
-        : "（コメントなし）";
-    const dt = approvalDateStr || "";
-    resultBlock = `
-      <div class="section result-section">
-        <div class="result-row">
-          <span class="result-label">結果</span>
-          <span class="result-value">${rn || "—"}</span>
-        </div>
-        ${
-          dt
-            ? `<div class="result-row">
-                 <span class="result-label">日時</span>
-                 <span class="result-value">${dt}</span>
-               </div>`
-            : ""
-        }
-      </div>
-      <div class="section">
-        <div class="section-title">コメント</div>
-        <div class="section-body">${ct.replace(/\n/g, "<br>")}</div>
-      </div>
-    `;
-  }
-
-  // ★ 初回（message があるとき）は赤い「すでに承認済み」メッセージを出さない
-  const statusHtml =
-    alreadyResult && !safeMessage
-      ? `<div class="status status-locked">
-           この承認票はすでに「${alreadyResult}」として登録されています。<br>
-           送信内容の変更や再回答はできません。必要な場合は事務局までご連絡ください。
-         </div>`
-      : "";
-
-  const decision = defaultDecision === "deny" ? "deny" : "approve";
-
-  const formHtml = showForm
-    ? `<form method="POST" action="/api/sendApprovalGet?pageId=${pageId}">
-         <fieldset class="field-group">
-           <legend class="field-title">承認／否認</legend>
-           <label class="radio-row">
-             <input type="radio" name="decision" value="approve" ${
-               decision === "deny" ? "" : "checked"
-             } />
-             <span>承認する</span>
-           </label>
-           <label class="radio-row">
-             <input type="radio" name="decision" value="deny" ${
-               decision === "deny" ? "checked" : ""
-             } />
-             <span>否認する</span>
-           </label>
-         </fieldset>
-
-         <div class="field-group">
-           <label for="comment" class="field-title">コメント（任意）</label>
-           <textarea id="comment" name="comment"
-             placeholder="必要に応じてコメントを入力してください。\n※否認の場合は理由の記載をお願いします。"
-             class="textarea"></textarea>
-         </div>
-
-         <p class="note">
-           ・承認／否認どちらの場合もコメントを記入できます。<br>
-           ・この承認票には 1 度だけ回答できます。送信後の取り消し・修正はできません。<br>
-           ・否認を選択した場合はコメントの入力が必須です。
-         </p>
-
-         <div class="actions">
-           <button type="submit" class="primary-button">
-             送信する
-           </button>
-         </div>
-       </form>`
-    : "";
-
-  return `<!doctype html>
+  return `
+<!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="utf-8" />
-  <title>${heading}</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f2f2f7;
-      --card-bg: #ffffff;
-      --border-subtle: #e0e0e0;
-      --text-main: #111111;
-      --text-sub: #555555;
-      --accent: #007aff;
-      --danger: #c62828;
-      --radius-card: 14px;
-      --radius-button: 999px;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      padding: 16px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-      line-height: 1.6;
-      background: var(--bg);
-      color: var(--text-main);
-    }
-    .box {
-      max-width: 680px;
-      margin: 0 auto;
-      background: var(--card-bg);
-      border-radius: var(--radius-card);
-      border: 1px solid var(--border-subtle);
-      padding: 18px 18px 20px;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.03);
-    }
-    h1 {
-      font-size: 17px;
-      margin: 0 0 10px;
-      font-weight: 600;
-    }
-    .message {
-      margin-bottom: 10px;
-      font-size: 14px;
-      color: var(--danger);
-    }
-    .info-card {
-      border-radius: 12px;
-      border: 1px solid var(--border-subtle);
-      padding: 12px 14px;
-      margin-bottom: 12px;
-      background: #fafafa;
-    }
-    .info-header {
-      font-size: 13px;
-      font-weight: 600;
-      margin-bottom: 6px;
-    }
-    .info-block > div {
-      display: flex;
-      flex-wrap: wrap;
-      font-size: 14px;
-      margin-bottom: 3px;
-    }
-    .info-block .label {
-      min-width: 72px;
-      color: var(--text-sub);
-    }
-    .info-block .value {
-      flex: 1;
-      font-weight: 500;
-    }
-    .section {
-      margin-top: 8px;
-    }
-    .section-title {
-      font-size: 13px;
-      font-weight: 600;
-      margin-bottom: 3px;
-      color: var(--text-sub);
-    }
-    .section-body {
-      font-size: 14px;
-      white-space: pre-wrap;
-    }
-    .attach-list {
-      list-style: none;
-      padding: 0;
-      margin: 4px 0 0;
-    }
-    .attach-item + .attach-item {
-      margin-top: 4px;
-    }
-    .attach-link {
-      display: inline-block;
-      font-size: 14px;
-      text-decoration: none;
-      color: var(--accent);
-      padding: 5px 9px;
-      border-radius: 999px;
-      border: 1px solid rgba(0,122,255,0.3);
-      background: rgba(0,122,255,0.04);
-    }
-    .status {
-      font-size: 13px;
-      margin: 10px 0 8px;
-      border-radius: 10px;
-      padding: 9px 11px;
-    }
-    .status-locked {
-      background: #ffecec;
-      color: var(--danger);
-      border: 1px solid rgba(198,40,40,0.2);
-    }
-    .result-section {
-      margin-top: 8px;
-    }
-    .result-row {
-      display: flex;
-      flex-wrap: wrap;
-      font-size: 14px;
-      margin-bottom: 3px;
-    }
-    .result-label {
-      min-width: 52px;
-      color: var(--text-sub);
-    }
-    .result-value {
-      flex: 1;
-      font-weight: 500;
-    }
-    .field-group {
-      border: none;
-      margin: 12px 0 6px;
-      padding: 0;
-    }
-    .field-title {
-      display: block;
-      font-size: 14px;
-      font-weight: 600;
-      margin-bottom: 4px;
-    }
-    .radio-row {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 15px;
-      padding: 6px 0;
-    }
-    .radio-row input[type="radio"] {
-      width: 18px;
-      height: 18px;
-    }
-    .textarea {
-      width: 100%;
-      min-height: 140px;
-      font-size: 14px;
-      padding: 8px 10px;
-      border-radius: 10px;
-      border: 1px solid var(--border-subtle);
-      resize: vertical;
-    }
-    .note {
-      font-size: 12px;
-      color: var(--text-sub);
-      margin-top: 4px;
-    }
-    .actions {
-      margin-top: 14px;
-      display: flex;
-      justify-content: flex-end;
-    }
-    .primary-button {
-      padding: 9px 18px;
-      border-radius: var(--radius-button);
-      border: none;
-      cursor: pointer;
-      background: var(--accent);
-      color: #fff;
-      font-weight: 600;
-      font-size: 15px;
-    }
-    .primary-button:active {
-      filter: brightness(0.9);
-    }
-    @media (max-width: 480px) {
-      .box {
-        padding: 14px 12px 16px;
-        border-radius: 12px;
-      }
-      .primary-button {
-        width: 100%;
-        justify-content: center;
-      }
-      .actions {
-        margin-top: 12px;
-      }
-    }
-  </style>
+<meta charset="UTF-8" />
+<title>${escapeHtml(title)}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 16px; line-height: 1.6; }
+  .container { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 20px; margin-bottom: 12px; }
+  .box { border: 1px solid #ddd; border-radius: 8px; padding: 12px 14px; margin-top: 12px; }
+  .row { margin-bottom: 8px; }
+  .label { font-weight: 600; margin-right: 4px; }
+</style>
 </head>
 <body>
+<div class="container">
+  <h1>${escapeHtml(title)}</h1>
   <div class="box">
-    <h1>${heading}</h1>
-    ${safeMessage ? `<div class="message">${safeMessage}</div>` : ""}
-    <div class="info-card">
-      <div class="info-header">議案情報</div>
-      ${infoHtml}
-      ${descHtml}
-      ${attachHtml}
-    </div>
-    ${statusHtml}
-    ${resultBlock}
-    ${formHtml}
+    <div class="row"><span class="label">結果：</span>${escapeHtml(resultLabel)}</div>
+    <div class="row"><span class="label">日時：</span>${escapeHtml(datetimeText)}</div>
+    <div class="row"><span class="label">コメント：</span>${commentText}</div>
   </div>
+</div>
 </body>
-</html>`;
+</html>
+`;
 }
 
-// x-www-form-urlencoded をパース
-async function parseFormBody(req) {
+function renderFormPage({ ticketId, proposal, errorMessage }) {
+  const title = "承認依頼";
+  const proposalTitle = proposal.title || "";
+  const author = proposal.author || "";
+  const desc = proposal.description || "";
+  const attachments = proposal.attachments || [];
+
+  const attachHtml = attachments
+    .map((a, index) => {
+      const label = a.label || `添付資料${index + 1}`;
+      const url = a.url;
+      if (!url) return "";
+      return `<div class="row"><a href="${escapeHtml(
+        url
+      )}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a></div>`;
+    })
+    .join("");
+
+  const errorHtml = errorMessage
+    ? `<div class="error">${escapeHtml(errorMessage)}</div>`
+    : "";
+
+  return `
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<title>${escapeHtml(title)}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 16px; line-height: 1.6; }
+  .container { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 20px; margin-bottom: 12px; }
+  .box { border: 1px solid #ddd; border-radius: 8px; padding: 12px 14px; margin-top: 12px; }
+  .row { margin-bottom: 8px; }
+  .label { font-weight: 600; margin-right: 4px; }
+  .error { color: #c00; margin-bottom: 8px; }
+  .note { font-size: 12px; color: #555; margin-top: 8px; }
+  button { padding: 8px 16px; border-radius: 4px; border: none; cursor: pointer; }
+  .btn-submit { background: #007bff; color: #fff; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>${escapeHtml(title)}</h1>
+
+  <div class="box">
+    <div class="row"><span class="label">議案：</span>${escapeHtml(
+      proposalTitle
+    )}</div>
+    <div class="row"><span class="label">作成者：</span>${escapeHtml(
+      author
+    )}</div>
+    <div class="row"><span class="label">内容：</span>${escapeHtml(desc)}</div>
+    ${attachHtml}
+  </div>
+
+  <form method="POST" style="margin-top: 16px;">
+    ${errorHtml}
+    <div class="box">
+      <div class="row">
+        <span class="label">結果：</span>
+        <label><input type="radio" name="decision" value="approve"> 承認</label>
+        <label style="margin-left: 16px;"><input type="radio" name="decision" value="deny"> 否認</label>
+      </div>
+      <div class="row">
+        <div class="label">コメント：</div>
+        <textarea name="comment" rows="4" style="width:100%;"></textarea>
+      </div>
+      <div class="note">
+        ※ この承認票には 1 度だけ回答できます。送信後の取り消し・修正はできません。<br/>
+        ※ 否認を選択した場合はコメント（理由）の入力が必須です。
+      </div>
+      <div class="row" style="margin-top: 12px;">
+        <button type="submit" class="btn-submit">送信する</button>
+      </div>
+    </div>
+  </form>
+</div>
+</body>
+</html>
+`;
+}
+
+// --- Notion から表示用データを取得 ---------------------------------------
+
+async function getTicketAndProposal(ticketId) {
+  const ticketPage = await notionFetch(`pages/${ticketId}`);
+  const tProps = ticketPage.properties || {};
+
+  // 承認結果 / 承認日時 / コメント
+  const resultSelect = tProps["承認結果"]?.select?.name || "";
+  const approvedAt = tProps["承認日時"]?.date?.start || "";
+  const commentProp =
+    tProps["コメント"]?.rich_text?.[0]?.plain_text ||
+    tProps["コメント（表示用）」]?.rich_text?.[0]?.plain_text || // タイプミス対策
+    tProps["コメント（表示用)"]?.rich_text?.[0]?.plain_text ||
+    "";
+
+  // 議案リレーション
+  const proposalRel = tProps["議案"]?.relation || [];
+  const proposalId = proposalRel[0]?.id;
+
+  let proposal = {
+    id: "",
+    title: "",
+    author: "",
+    description: "",
+    attachments: [],
+  };
+
+  if (proposalId) {
+    const proposalPage = await notionFetch(`pages/${proposalId}`);
+    const pProps = proposalPage.properties || {};
+
+    const title =
+      proposalPage.properties["議案"]?.title?.[0]?.plain_text ||
+      proposalPage.properties["名前"]?.title?.[0]?.plain_text ||
+      "";
+
+    const author =
+      pProps["提出者"]?.people?.[0]?.name ||
+      pProps["作成者"]?.people?.[0]?.name ||
+      "";
+
+    const descRich =
+      pProps["内容（説明）」]?.rich_text || pProps["内容（説明)"]?.rich_text;
+    const desc =
+      (Array.isArray(descRich) ? descRich.map((r) => r.plain_text).join("") : "") ||
+      pProps["内容（説明）」]?.rich_text?.[0]?.plain_text ||
+      pProps["内容（説明)"]?.rich_text?.[0]?.plain_text ||
+      "";
+
+    // 添付URL群（添付URL / 添付URL1〜5）
+    const attachDefs = [
+      { urlKey: "添付URL", labelKey: "添付資料名" },
+      { urlKey: "添付URL1", labelKey: "添付資料名1" },
+      { urlKey: "添付URL2", labelKey: "添付資料名2" },
+      { urlKey: "添付URL3", labelKey: "添付資料名3" },
+      { urlKey: "添付URL4", labelKey: "添付資料名4" },
+      { urlKey: "添付URL5", labelKey: "添付資料名5" },
+    ];
+
+    const attachments = attachDefs
+      .map((def, idx) => {
+        const url = pProps[def.urlKey]?.url || "";
+        if (!url) return null;
+        const label =
+          pProps[def.labelKey]?.rich_text?.[0]?.plain_text ||
+          pProps[def.labelKey]?.title?.[0]?.plain_text ||
+          (idx === 0 ? "添付資料を開く" : `添付資料${idx + 1}`);
+        return { url, label };
+      })
+      .filter(Boolean);
+
+    proposal = {
+      id: proposalId,
+      title,
+      author,
+      description: desc,
+      attachments,
+    };
+  }
+
+  return {
+    ticketPage,
+    resultSelect,
+    approvedAt,
+    comment: commentProp,
+    proposal,
+  };
+}
+
+// --- POST ボディ取得 ------------------------------------------------------
+
+async function parsePostBody(req) {
   const chunks = [];
   for await (const chunk of req) {
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString("utf8");
-  const params = {};
-  for (const pair of raw.split("&")) {
-    if (!pair) continue;
-    const [k, v] = pair.split("=");
-    const key = decodeURIComponent(k.replace(/\+/g, " "));
-    const val = decodeURIComponent((v || "").replace(/\+/g, " "));
-    params[key] = val;
+  const params = new URLSearchParams(raw);
+  const data = {};
+  for (const [key, value] of params.entries()) {
+    data[key] = value;
   }
-  return params;
+  return data;
 }
 
-module.exports = async (req, res) => {
-  const { pageId } = req.query;
+// --- メインハンドラ -------------------------------------------------------
 
-  if (!pageId) {
-    res.statusCode = 400;
-    return res.end("pageId が指定されていません。");
-  }
-
-  if (!NOTION_API_KEY) {
-    res.statusCode = 500;
-    return res.end("サーバー設定エラー：NOTION_API_KEY が未設定です。");
-  }
-
+export default async function handler(req, res) {
   try {
-    // まず承認票ページを取得
-    const ticketPage = await getPage(pageId);
-    const tProps = ticketPage.properties || {};
-
-    // 承認票タイトル（議案名／氏名など）※今は見出しには使わない
-    const tTitleProp = tProps["名前"] || tProps["タイトル"];
-    const ticketTitle = extractText(tTitleProp) || "承認フォーム";
-
-    // 承認結果（ロック判定用）
-    const resultProp = tProps["承認結果"];
-    const alreadyResult =
-      resultProp && resultProp.select && resultProp.select.name
-        ? resultProp.select.name
-        : null;
-
-    // コメント（完了画面用）
-    const commentProp = tProps["コメント"];
-    const storedComment = extractText(commentProp) || "";
-
-    // 承認日時（完了画面用）
-    let approvalDateStr = "";
-    const approveDateProp = tProps["承認日時"];
-    if (approveDateProp && approveDateProp.date && approveDateProp.date.start) {
-      approvalDateStr = formatDateTime(approveDateProp.date.start);
+    const { id } = req.query;
+    if (!id) {
+      res.status(400).send("Missing id");
+      return;
     }
-
-    // 関連議案を取得（1件想定）
-    let proposalTitle = "";
-    let authorName = "";
-    let description = "";
-    let attachments = [];
-
-    const relProp = tProps["議案"];
-    if (
-      relProp &&
-      Array.isArray(relProp.relation) &&
-      relProp.relation.length > 0
-    ) {
-      const proposalId = relProp.relation[0].id;
-      const proposalPage = await getPage(proposalId);
-      const pProps = proposalPage.properties || {};
-
-      const pTitleProp =
-        pProps["議案"] || pProps["名前"] || pProps["タイトル"];
-      proposalTitle = extractText(pTitleProp) || "";
-
-      const authorProp =
-        pProps["提出者"] ||
-        pProps["作成者"] ||
-        pProps["担当者（施行）"];
-
-      if (
-        authorProp &&
-        Array.isArray(authorProp.people) &&
-        authorProp.people.length > 0
-      ) {
-        const p = authorProp.people[0];
-        authorName = p.name || "";
-      }
-
-      const descProp =
-        pProps["内容（説明）"] ||
-        pProps["内容"] ||
-        pProps["説明"];
-
-      description = extractText(descProp) || "";
-
-      attachments = extractAttachments(pProps);
-    }
+    const ticketId = id;
 
     if (req.method === "GET") {
-      if (alreadyResult) {
-        // すでに承認済みのとき：結果とコメントのみ表示（内容・添付は非表示）
-        const heading =
-          alreadyResult === "承認"
-            ? "承認内容確認"
-            : alreadyResult === "否認"
-            ? "否認内容確認"
-            : "回答内容確認";
+      // GET: フォーム or 結果表示
+      const { resultSelect, approvedAt, comment, proposal } =
+        await getTicketAndProposal(ticketId);
 
-        const html = renderHtml({
-          pageHeading: heading,
-          ticketTitle,
-          proposalTitle,
-          authorName,
-          description,
-          attachments,
-          alreadyResult,
-          showForm: false,
-          pageId,
-          message: "",
-          defaultDecision: "approve",
-          resultName: alreadyResult,
-          commentText: storedComment,
-          approvalDateStr,
+      // すでに承認結果がある場合はフォームを出さず結果のみ表示
+      if (resultSelect === "承認" || resultSelect === "否認") {
+        const html = renderResultPage({
+          result: resultSelect,
+          datetime: approvedAt,
+          comment,
         });
-        res.setHeader("Content-Type", "text/html; charset=utf-8");
-        return res.status(200).end(html);
-      } else {
-        // 初回表示：詳細とフォームを表示
-        const msg =
-          "議案の内容を確認し、承認または否認を選択して送信してください。";
-        const html = renderHtml({
-          pageHeading: "承認依頼",
-          ticketTitle,
-          proposalTitle,
-          authorName,
-          description,
-          attachments,
-          alreadyResult: null,
-          showForm: true,
-          pageId,
-          message: msg,
-          defaultDecision: "approve",
-          resultName: null,
-          commentText: "",
-          approvalDateStr: "",
-        });
-        res.setHeader("Content-Type", "text/html; charset=utf-8");
-        return res.status(200).end(html);
+        res.status(200).setHeader("Content-Type", "text/html; charset=utf-8");
+        res.send(html);
+        return;
       }
+
+      // 未回答 → フォーム表示
+      const html = renderFormPage({ ticketId, proposal, errorMessage: "" });
+      res.status(200).setHeader("Content-Type", "text/html; charset=utf-8");
+      res.send(html);
+      return;
     }
 
     if (req.method === "POST") {
-      // 2回目以降はロック
-      if (alreadyResult) {
-        const heading =
-          alreadyResult === "承認"
-            ? "承認内容確認"
-            : alreadyResult === "否認"
-            ? "否認内容確認"
-            : "回答内容確認";
+      const form = await parsePostBody(req);
+      const decision = form.decision;
+      const commentInput = form.comment || "";
 
-        const html = renderHtml({
-          pageHeading: heading,
-          ticketTitle,
-          proposalTitle,
-          authorName,
-          description,
-          attachments,
-          alreadyResult,
-          showForm: false,
-          pageId,
-          message: "",
-          defaultDecision: "approve",
-          resultName: alreadyResult,
-          commentText: storedComment,
-          approvalDateStr,
-        });
-        res.setHeader("Content-Type", "text/html; charset=utf-8");
-        return res.status(200).end(html);
+      // 再度チェック：すでに回答済みならロック画面
+      {
+        const { resultSelect, approvedAt, comment, proposal } =
+          await getTicketAndProposal(ticketId);
+        if (resultSelect === "承認" || resultSelect === "否認") {
+          const html = renderResultPage({
+            result: resultSelect,
+            datetime: approvedAt,
+            comment,
+          });
+          res
+            .status(200)
+            .setHeader("Content-Type", "text/html; charset=utf-8");
+          res.send(html);
+          return;
+        }
+
+        // decision 未選択
+        if (!decision || (decision !== "approve" && decision !== "deny")) {
+          const html = renderFormPage({
+            ticketId,
+            proposal,
+            errorMessage: "承認か否認を選択してください。",
+          });
+          res
+            .status(200)
+            .setHeader("Content-Type", "text/html; charset=utf-8");
+          res.send(html);
+          return;
+        }
+
+        // 否認時コメント必須
+        if (decision === "deny" && !commentInput.trim()) {
+          const html = renderFormPage({
+            ticketId,
+            proposal,
+            errorMessage:
+              "否認を選択した場合はコメント（理由）の入力が必須です。",
+          });
+          res
+            .status(200)
+            .setHeader("Content-Type", "text/html; charset=utf-8");
+          res.send(html);
+          return;
+        }
       }
 
-      const form = await parseFormBody(req);
-      const decision = form.decision === "deny" ? "deny" : "approve";
-      const comment = form.comment || "";
-      const trimmedComment = comment.trim();
-
-      // 否認の場合はコメント必須
-      if (decision === "deny" && !trimmedComment) {
-        const html = renderHtml({
-          pageHeading: "承認依頼",
-          ticketTitle,
-          proposalTitle,
-          authorName,
-          description,
-          attachments,
-          alreadyResult: null,
-          showForm: true,
-          pageId,
-          message: "否認を選択した場合はコメント（理由）の入力が必須です。",
-          defaultDecision: "deny",
-          resultName: null,
-          commentText: "",
-          approvalDateStr: "",
-        });
-        res.setHeader("Content-Type", "text/html; charset=utf-8");
-        return res.status(200).end(html);
-      }
-
+      // ここまで来たら回答を反映
       const now = new Date().toISOString();
-      const resultName = decision === "deny" ? "否認" : "承認";
-      const heading =
-        resultName === "承認"
-          ? "承認内容確認"
-          : resultName === "否認"
-          ? "否認内容確認"
-          : "回答内容確認";
+      const resultName = decision === "approve" ? "承認" : "否認";
 
-      const body = {
+      // チケット更新（承認結果／承認日時／コメント）
+      const updateBody = {
         properties: {
-          承認結果: {
-            select: { name: resultName },
-          },
-          承認日時: {
-            date: { start: now },
-          },
-          コメント: {
-            rich_text: trimmedComment
-              ? [
-                  {
-                    text: { content: trimmedComment },
-                  },
-                ]
-              : [],
-          },
+          承認結果: { select: { name: resultName } },
+          承認日時: { date: { start: now } },
         },
       };
 
-      const updateRes = await fetch(
-        `https://api.notion.com/v1/pages/${pageId}`,
-        {
-          method: "PATCH",
-          headers: notionHeaders(),
-          body: JSON.stringify(body),
-        }
-      );
-
-      const text = await updateRes.text();
-      if (!updateRes.ok) {
-        console.error("Notion update (sendApprovalGet) error:", text);
-        res.statusCode = 500;
-        return res.end(
-          "回答の登録に失敗しました。時間をおいて再度お試しください。"
-        );
+      if (commentInput && commentInput.trim()) {
+        updateBody.properties["コメント"] = {
+          rich_text: [{ type: "text", text: { content: commentInput } }],
+        };
+        updateBody.properties["コメント（表示用）"] = {
+          rich_text: [{ type: "text", text: { content: commentInput } }],
+        };
       }
 
-      const doneMsg =
-        decision === "deny"
-          ? "否認を受け付けました。ご回答ありがとうございます。"
-          : "承認を受け付けました。ご回答ありがとうございます。";
-
-      const html = renderHtml({
-        pageHeading: heading,
-        ticketTitle,
-        proposalTitle,
-        authorName,
-        description,
-        attachments,
-        alreadyResult: resultName,
-        showForm: false,
-        pageId,
-        message: doneMsg,
-        defaultDecision: "approve",
-        resultName,
-        commentText: trimmedComment,
-        approvalDateStr: formatDateTime(now),
+      await notionFetch(`pages/${ticketId}`, {
+        method: "PATCH",
+        body: JSON.stringify(updateBody),
       });
-      res.setHeader("Content-Type", "text/html; charset=utf-8");
-      return res.status(200).end(html);
+
+      // 再取得して結果画面用に整形 ＋ 議案ステータス自動更新
+      const { resultSelect, approvedAt, comment, proposal } =
+        await getTicketAndProposal(ticketId);
+
+      if (proposal.id) {
+        await updateProposalStatus(proposal.id);
+      }
+
+      const html = renderResultPage({
+        result: resultSelect || resultName,
+        datetime: approvedAt || now,
+        comment: comment || commentInput,
+      });
+      res.status(200).setHeader("Content-Type", "text/html; charset=utf-8");
+      res.send(html);
+      return;
     }
 
-    res.setHeader("Allow", "GET, POST");
-    res.statusCode = 405;
-    return res.end("Method Not Allowed");
-  } catch (err) {
-    console.error("sendApprovalGet error:", err);
-    res.statusCode = 500;
-    return res.end(
-      "内部エラーが発生しました。時間をおいて再度お試しください。"
-    );
+    // その他メソッド
+    res.status(405).send("Method Not Allowed");
+  } catch (e) {
+    console.error("sendApprovalGet error:", e);
+    res.status(500).send("Internal Server Error");
   }
-};
+}
