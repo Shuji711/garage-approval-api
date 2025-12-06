@@ -2,6 +2,7 @@
 // LINE からの「内容を確認する」ボタン用。
 // 承認票ID(pageId)を受け取り、議案情報＋承認/否認フォームを表示。
 // 1度回答した承認票はロックし、2回目以降は「回答済み」と表示する。
+// 添付資料は最大5件まで表示し、あれば「添付資料名」プロパティをラベルとして利用する。
 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const NOTION_VERSION = "2022-06-28";
@@ -38,13 +39,63 @@ function extractText(prop) {
   return "";
 }
 
-// シンプルなHTMLレンダリング
+// 議案ページから添付資料一覧を取得
+// 想定プロパティ：
+//  - 添付URL / 添付URL1〜5   : URL or リッチテキスト
+//  - 添付資料名 / 添付資料名1〜5 : ラベル用（リッチテキスト）
+function extractAttachments(pProps) {
+  const attachments = [];
+
+  // index = 0 用（添付URL / 添付資料名）
+  const patterns = [
+    { urlKey: "添付URL", labelKey: "添付資料名" },
+  ];
+
+  // 添付URL1〜5 / 添付資料名1〜5 を順番に追加
+  for (let i = 1; i <= 5; i++) {
+    patterns.push({
+      urlKey: `添付URL${i}`,
+      labelKey: `添付資料名${i}`,
+    });
+  }
+
+  for (let i = 0; i < patterns.length; i++) {
+    const { urlKey, labelKey } = patterns[i];
+
+    const urlProp = pProps[urlKey];
+    if (!urlProp) continue;
+
+    let url = "";
+    if (urlProp.url) {
+      url = urlProp.url;
+    } else if (Array.isArray(urlProp.rich_text)) {
+      url = extractText(urlProp);
+    }
+    url = (url || "").trim();
+    if (!url) continue;
+
+    const labelProp = pProps[labelKey];
+    let label = labelProp ? extractText(labelProp).trim() : "";
+
+    if (!label) {
+      // ラベルがなければデフォルト名
+      const index = attachments.length + 1;
+      label = attachments.length === 0 ? "添付資料を開く" : `添付資料${index}`;
+    }
+
+    attachments.push({ url, label });
+  }
+
+  return attachments;
+}
+
+// シンプルなHTMLレンダリング（モバイルファースト・Apple HIG寄せ）
 function renderHtml({
   ticketTitle,
   proposalTitle,
   authorName,
   description,
-  attachmentUrl,
+  attachments, // [{url, label}]
   alreadyResult, // "承認" / "否認" / null
   showForm,
   pageId,
@@ -54,32 +105,51 @@ function renderHtml({
   const infoLines = [];
 
   if (proposalTitle) {
-    infoLines.push(`<div><strong>議案名</strong>：${proposalTitle}</div>`);
+    infoLines.push(
+      `<div><span class="label">議案名</span><span class="value">${proposalTitle}</span></div>`
+    );
   }
   if (authorName) {
-    infoLines.push(`<div><strong>作成者</strong>：${authorName}</div>`);
+    infoLines.push(
+      `<div><span class="label">作成者</span><span class="value">${authorName}</span></div>`
+    );
   }
 
   const infoHtml = infoLines.length
-    ? `<div style="margin-bottom: 12px;">${infoLines.join("")}</div>`
+    ? `<div class="info-block">${infoLines.join("")}</div>`
     : "";
 
   const descHtml = description
-    ? `<div class="section-title">内容（説明）</div>
-       <div style="white-space: pre-wrap; margin-top: 4px;">${description}</div>`
-    : "";
-
-  const attachHtml = attachmentUrl
-    ? `<div style="margin-top: 8px;">
-         <strong>添付資料</strong>：
-         <a href="${attachmentUrl}" target="_blank" rel="noopener noreferrer">こちらを開く</a>
+    ? `<div class="section">
+         <div class="section-title">内容（説明）</div>
+         <div class="section-body">${description.replace(/\n/g, "<br>")}</div>
        </div>`
     : "";
+
+  let attachHtml = "";
+  if (attachments && attachments.length > 0) {
+    const items = attachments
+      .map(
+        (att) =>
+          `<li class="attach-item">
+             <a href="${att.url}" target="_blank" rel="noopener noreferrer" class="attach-link">
+               ${att.label}
+             </a>
+           </li>`
+      )
+      .join("");
+    attachHtml = `<div class="section">
+        <div class="section-title">添付資料</div>
+        <ul class="attach-list">
+          ${items}
+        </ul>
+      </div>`;
+  }
 
   // ★ 初回（message があるとき）は赤い「すでに承認済み」メッセージを出さない
   const statusHtml =
     alreadyResult && !safeMessage
-      ? `<div style="margin: 12px 0; color: #c62828;">
+      ? `<div class="status status-locked">
            この承認票はすでに「${alreadyResult}」として登録されています。<br>
            送信内容の変更や再回答はできません。必要な場合は事務局までご連絡ください。
          </div>`
@@ -87,34 +157,32 @@ function renderHtml({
 
   const formHtml = showForm
     ? `<form method="POST" action="/api/sendApprovalGet?pageId=${pageId}">
-         <fieldset style="border:none; margin: 12px 0;">
-           <legend style="font-weight:bold;">承認／否認</legend>
-           <label>
+         <fieldset class="field-group">
+           <legend class="field-title">承認／否認</legend>
+           <label class="radio-row">
              <input type="radio" name="decision" value="approve" checked />
-             承認する
+             <span>承認する</span>
            </label>
-           &nbsp;&nbsp;
-           <label>
+           <label class="radio-row">
              <input type="radio" name="decision" value="deny" />
-             否認する
+             <span>否認する</span>
            </label>
          </fieldset>
 
-         <div style="margin-top: 8px;">
-           <label for="comment" style="font-weight:bold;">コメント（任意）</label><br />
+         <div class="field-group">
+           <label for="comment" class="field-title">コメント（任意）</label>
            <textarea id="comment" name="comment"
-             placeholder="必要に応じてコメントを入力してください。&#10;※否認の場合は理由の記載をお願いします。"
-             style="width:100%; min-height:140px;"></textarea>
+             placeholder="必要に応じてコメントを入力してください。\n※否認の場合は理由の記載をお願いします。"
+             class="textarea"></textarea>
          </div>
 
-         <p style="font-size: 0.85rem; color:#555; margin-top: 8px;">
+         <p class="note">
            ・承認／否認どちらの場合もコメントを記入できます。<br>
            ・この承認票には 1 度だけ回答できます。送信後の取り消し・修正はできません。
          </p>
 
-         <div style="margin-top: 16px;">
-           <button type="submit"
-             style="padding: 10px 20px; border-radius: 4px; border: none; cursor: pointer; background:#1976d2; color:#fff; font-weight:bold;">
+         <div class="actions">
+           <button type="submit" class="primary-button">
              送信する
            </button>
          </div>
@@ -128,20 +196,193 @@ function renderHtml({
   <title>${ticketTitle || "承認フォーム"}</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-           padding: 24px; line-height: 1.6; background:#f5f5f5; }
-    .box { max-width: 720px; margin: 0 auto; background:#fff; border-radius: 8px;
-           border: 1px solid #ddd; padding: 20px 24px; box-sizing:border-box; }
-    h1 { font-size: 1.1rem; margin-top: 0; margin-bottom: 12px; }
-    .section-title { font-weight:bold; margin-top: 12px; margin-bottom:4px; }
+    :root {
+      color-scheme: light;
+      --bg: #f2f2f7;
+      --card-bg: #ffffff;
+      --border-subtle: #e0e0e0;
+      --text-main: #111111;
+      --text-sub: #555555;
+      --accent: #007aff;
+      --danger: #c62828;
+      --radius-card: 14px;
+      --radius-button: 999px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      line-height: 1.6;
+      background: var(--bg);
+      color: var(--text-main);
+    }
+    .box {
+      max-width: 680px;
+      margin: 0 auto;
+      background: var(--card-bg);
+      border-radius: var(--radius-card);
+      border: 1px solid var(--border-subtle);
+      padding: 18px 18px 20px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.03);
+    }
+    h1 {
+      font-size: 17px;
+      margin: 0 0 10px;
+      font-weight: 600;
+    }
+    .message {
+      margin-bottom: 12px;
+      font-size: 14px;
+      color: var(--text-sub);
+    }
+    .info-card {
+      border-radius: 12px;
+      border: 1px solid var(--border-subtle);
+      padding: 12px 14px;
+      margin-bottom: 16px;
+      background: #fafafa;
+    }
+    .info-header {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .info-block > div {
+      display: flex;
+      flex-wrap: wrap;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }
+    .info-block .label {
+      min-width: 72px;
+      color: var(--text-sub);
+    }
+    .info-block .value {
+      flex: 1;
+      font-weight: 500;
+    }
+    .section {
+      margin-top: 10px;
+    }
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      color: var(--text-sub);
+    }
+    .section-body {
+      font-size: 14px;
+      white-space: pre-wrap;
+    }
+    .attach-list {
+      list-style: none;
+      padding: 0;
+      margin: 4px 0 0;
+    }
+    .attach-item + .attach-item {
+      margin-top: 6px;
+    }
+    .attach-link {
+      display: inline-block;
+      font-size: 14px;
+      text-decoration: none;
+      color: var(--accent);
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(0,122,255,0.3);
+      background: rgba(0,122,255,0.04);
+    }
+    .status {
+      font-size: 13px;
+      margin: 12px 0;
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .status-locked {
+      background: #ffecec;
+      color: var(--danger);
+      border: 1px solid rgba(198,40,40,0.2);
+    }
+    .field-group {
+      border: none;
+      margin: 14px 0 8px;
+      padding: 0;
+    }
+    .field-title {
+      display: block;
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .radio-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 15px;
+      padding: 8px 0;
+    }
+    .radio-row input[type="radio"] {
+      width: 18px;
+      height: 18px;
+    }
+    .textarea {
+      width: 100%;
+      min-height: 140px;
+      font-size: 14px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid var(--border-subtle);
+      resize: vertical;
+    }
+    .note {
+      font-size: 12px;
+      color: var(--text-sub);
+      margin-top: 6px;
+    }
+    .actions {
+      margin-top: 16px;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .primary-button {
+      padding: 10px 20px;
+      border-radius: var(--radius-button);
+      border: none;
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      font-size: 15px;
+    }
+    .primary-button:active {
+      filter: brightness(0.9);
+    }
+    @media (max-width: 480px) {
+      .box {
+        padding: 14px 12px 16px;
+        border-radius: 12px;
+      }
+      .primary-button {
+        width: 100%;
+        justify-content: center;
+      }
+      .actions {
+        margin-top: 14px;
+      }
+    }
   </style>
 </head>
 <body>
   <div class="box">
     <h1>${ticketTitle || "承認フォーム"}</h1>
-    ${safeMessage ? `<div style="margin-bottom: 12px;">${safeMessage}</div>` : ""}
-    <div style="border:1px solid #eee; border-radius:6px; padding:12px 12px 8px; margin-bottom:16px;">
-      <div class="section-title">議案情報</div>
+    ${
+      safeMessage
+        ? `<div class="message">${safeMessage}</div>`
+        : ""
+    }
+    <div class="info-card">
+      <div class="info-header">議案情報</div>
       ${infoHtml}
       ${descHtml}
       ${attachHtml}
@@ -204,15 +445,20 @@ module.exports = async (req, res) => {
     let proposalTitle = "";
     let authorName = "";
     let description = "";
-    let attachmentUrl = "";
+    let attachments = [];
 
     const relProp = tProps["議案"];
-    if (relProp && Array.isArray(relProp.relation) && relProp.relation.length > 0) {
+    if (
+      relProp &&
+      Array.isArray(relProp.relation) &&
+      relProp.relation.length > 0
+    ) {
       const proposalId = relProp.relation[0].id;
       const proposalPage = await getPage(proposalId);
       const pProps = proposalPage.properties || {};
 
-      const pTitleProp = pProps["議案"] || pProps["名前"] || pProps["タイトル"];
+      const pTitleProp =
+        pProps["議案"] || pProps["名前"] || pProps["タイトル"];
       proposalTitle = extractText(pTitleProp) || "";
 
       // 提出者 or 作成者 or 担当者（施行）
@@ -221,7 +467,11 @@ module.exports = async (req, res) => {
         pProps["作成者"] ||
         pProps["担当者（施行）"];
 
-      if (authorProp && Array.isArray(authorProp.people) && authorProp.people.length > 0) {
+      if (
+        authorProp &&
+        Array.isArray(authorProp.people) &&
+        authorProp.people.length > 0
+      ) {
         const p = authorProp.people[0];
         authorName = p.name || "";
       }
@@ -234,13 +484,8 @@ module.exports = async (req, res) => {
 
       description = extractText(descProp) || "";
 
-      // 添付URL or 添付URL1
-      const attachProp = pProps["添付URL"] || pProps["添付URL1"];
-      if (attachProp && attachProp.url) {
-        attachmentUrl = attachProp.url;
-      } else if (attachProp && attachProp.rich_text) {
-        attachmentUrl = extractText(attachProp);
-      }
+      // 添付資料（複数対応）
+      attachments = extractAttachments(pProps);
     }
 
     if (req.method === "GET") {
@@ -253,7 +498,7 @@ module.exports = async (req, res) => {
         proposalTitle,
         authorName,
         description,
-        attachmentUrl,
+        attachments,
         alreadyResult,
         showForm: !alreadyResult,
         pageId,
@@ -271,7 +516,7 @@ module.exports = async (req, res) => {
           proposalTitle,
           authorName,
           description,
-          attachmentUrl,
+          attachments,
           alreadyResult,
           showForm: false,
           pageId,
@@ -290,13 +535,13 @@ module.exports = async (req, res) => {
 
       const body = {
         properties: {
-          "承認結果": {
+          承認結果: {
             select: { name: resultName },
           },
-          "承認日時": {
+          承認日時: {
             date: { start: now },
           },
-          "コメント": {
+          コメント: {
             rich_text: comment
               ? [
                   {
@@ -308,17 +553,22 @@ module.exports = async (req, res) => {
         },
       };
 
-      const updateRes = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-        method: "PATCH",
-        headers: notionHeaders(),
-        body: JSON.stringify(body),
-      });
+      const updateRes = await fetch(
+        `https://api.notion.com/v1/pages/${pageId}`,
+        {
+          method: "PATCH",
+          headers: notionHeaders(),
+          body: JSON.stringify(body),
+        }
+      );
 
       const text = await updateRes.text();
       if (!updateRes.ok) {
         console.error("Notion update (sendApprovalGet) error:", text);
         res.statusCode = 500;
-        return res.end("回答の登録に失敗しました。時間をおいて再度お試しください。");
+        return res.end(
+          "回答の登録に失敗しました。時間をおいて再度お試しください。"
+        );
       }
 
       const doneMsg =
@@ -331,7 +581,7 @@ module.exports = async (req, res) => {
         proposalTitle,
         authorName,
         description,
-        attachmentUrl,
+        attachments,
         alreadyResult: resultName,
         showForm: false,
         pageId,
@@ -347,6 +597,8 @@ module.exports = async (req, res) => {
   } catch (err) {
     console.error("sendApprovalGet error:", err);
     res.statusCode = 500;
-    return res.end("内部エラーが発生しました。時間をおいて再度お試しください。");
+    return res.end(
+      "内部エラーが発生しました。時間をおいて再度お試しください。"
+    );
   }
 };
