@@ -214,9 +214,7 @@ async function getTicketAndProposal(ticketId) {
   const resultSelect = tProps["承認結果"]?.select?.name || "";
   const approvedAt = tProps["承認日時"]?.date?.start || "";
   const commentProp =
-    tProps["コメント"]?.rich_text?.[0]?.plain_text ||
-    tProps["コメント（表示用)"]?.rich_text?.[0]?.plain_text ||
-    "";
+    tProps["コメント"]?.rich_text?.[0]?.plain_text || "";
 
   const proposalRel = tProps["議案"]?.relation || [];
   const proposalId = proposalRel[0]?.id;
@@ -310,7 +308,6 @@ async function parsePostBody(req) {
 
 export default async function handler(req, res) {
   try {
-    // id と pageId の両方を受け付ける
     const { id, pageId } = req.query;
     const ticketId = id || pageId;
 
@@ -401,9 +398,6 @@ export default async function handler(req, res) {
 
       if (commentInput && commentInput.trim()) {
         updateBody.properties["コメント"] = {
-          rich_text: [{ type: "text", text: { content: commentInput } }],
-        };
-        updateBody.properties["コメント（表示用)"] = {
           rich_text: [{ type: "text", text: { content: commentInput } }],
         };
       }
